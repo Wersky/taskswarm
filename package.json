@@ -1,0 +1,48 @@
+{
+  "name": "taskswarm",
+  "version": "2.0.0",
+  "description": "任务蜂群（TaskSwarm）：ZCode 插件 —— 多级任务拆解、波次并行派发子代理、共享 MCP 看板进度互通。零依赖，仅需 Node.js >= 18。",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Wersky",
+    "url": "https://github.com/Wersky"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Wersky/taskswarm.git"
+  },
+  "homepage": "https://github.com/Wersky/taskswarm#readme",
+  "bugs": {
+    "url": "https://github.com/Wersky/taskswarm/issues"
+  },
+  "keywords": [
+    "zcode",
+    "zcode-plugin",
+    "mcp",
+    "mcp-server",
+    "multi-agent",
+    "orchestration",
+    "task-decomposition",
+    "任务蜂群"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "mcp/server.mjs",
+  "bin": {
+    "taskswarm-mcp": "mcp/server.mjs"
+  },
+  "files": [
+    ".zcode-plugin",
+    "commands",
+    "mcp",
+    "scripts",
+    "skills"
+  ],
+  "scripts": {
+    "test": "node --test \"mcp/**/*.test.mjs\" \"mcp/test/**/*.mjs\" \"mcp/test/**/*.js\" \"mcp/test/**/*.cjs\"",
+    "test:legacy": "node mcp/test.mjs",
+    "sync": "node scripts/sync-installed.mjs"
+  }
+}

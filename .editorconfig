@@ -1,0 +1,27 @@
+# .editorconfig — https://editorconfig.org
+# 匹配仓库现有代码风格：UTF-8、LF、2 空格缩进。
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{json,jsonc}]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.mjs]
+indent_size = 2
+
+[Makefile]
+indent_style = tab

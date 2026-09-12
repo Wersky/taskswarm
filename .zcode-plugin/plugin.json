@@ -1,0 +1,21 @@
+{
+  "name": "taskswarm",
+  "version": "2.0.0",
+  "description": "任务蜂群：多级任务拆解 + 波次并行派发子代理 + 共享看板进度互通。主代理把任务拆成任务树，按依赖波次并行启动后台子代理，子代理通过 MCP 看板互查进度，主代理负责转发关键进展与最终汇总。零依赖 Node 实现，可跨平台移植。",
+  "description_i18n": {
+    "en": "TaskSwarm: recursive task decomposition, wave-based parallel subagent dispatch, and a shared MCP progress board. Zero-dependency Node implementation.",
+    "zh-CN": "任务蜂群：多级任务拆解 + 波次并行派发子代理 + 共享看板进度互通。零依赖 Node 实现。"
+  },
+  "author": { "name": "Wersky" },
+  "license": "MIT",
+  "skills": "skills",
+  "commands": "commands",
+  "mcpServers": {
+    "taskswarm": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${ZCODE_PLUGIN_ROOT}/mcp/server.mjs"],
+      "cwd": "${ZCODE_PROJECT_DIR}"
+    }
+  }
+}
