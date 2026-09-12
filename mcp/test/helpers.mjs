@@ -13,16 +13,61 @@ import { fileURLToPath } from 'node:url';
 
 export const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.mjs');
 
-/** 测试用临时根目录。优先 D 盘（本机约定：不写 C 盘），失败则退回系统 tmp。 */
-export function tempRoot() {
-  const preferred = process.env.TASKSWARM_TEST_TMP || 'D:/zcode-work/daily/_swarm-tmp/t5';
-  try {
-    fs.mkdirSync(preferred, { recursive: true });
-    return preferred;
-  } catch {
-    return fs.mkdtempSync(path.join(os.tmpdir(), 'taskswarm-test-'));
-  }
+/**
+ * 活跃子进程登记表。
+ *
+ * 存在的意义：测试若中途抛错或进程被强杀，`after()` 钩子可能来不及执行，
+ * spawn 出来的 server 子进程就会变成孤儿进程一直挂着（实测遇到过 4 个孤儿）。
+ * 这里做两道兜底：
+ *   1. `process.on('exit')` 同步强杀所有登记的子进程；
+ *   2. 未捕获异常/信号时同样清理，避免污染使用者的环境。
+ * 每个 connect() 成功退出时会自行注销，正常路径不受影响。
+ */
+const liveChildren = new Set();
+
+function registerChild(child) {
+  liveChildren.add(child);
+  const drop = () => liveChildren.delete(child);
+  child.once('exit', drop);
+  child.once('close', drop);
+  return child;
 }
+
+function reapAll() {
+  for (const c of liveChildren) {
+    try { if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL'); } catch { /* 已退出 */ }
+  }
+  liveChildren.clear();
+}
+
+process.on('exit', reapAll);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { reapAll(); process.exit(130); });
+}
+
+/**
+ * 测试用临时根目录。
+ *
+ * 默认使用系统临时目录（跨平台），可用环境变量 TASKSWARM_TEST_TMP 覆盖。
+ * 注意：这里刻意**不硬编码任何机器相关路径**——否则别人克隆后跑 `npm test`
+ * 会因目录不存在或权限不足而失败（或把文件写到意料之外的位置）。
+ */
+export function tempRoot() {
+  const override = process.env.TASKSWARM_TEST_TMP;
+  if (override) {
+    try {
+      fs.mkdirSync(override, { recursive: true });
+      return override;
+    } catch {
+      // 覆盖值不可用（路径非法/无权限）时退回系统临时目录，不阻断测试
+    }
+  }
+  if (!cachedTempRoot) {
+    cachedTempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'taskswarm-test-'));
+  }
+  return cachedTempRoot;
+}
+let cachedTempRoot = null;
 
 /** 创建一个隔离的工作区目录（每个测试用例一个，互不干扰）。 */
 export function makeWorkspace(label = 'ws') {
@@ -40,11 +85,11 @@ export function rmWorkspace(dir) {
  *  - callRaw(name,args) 调工具；不抛异常，返回 {ok:true,data} 或 {ok:false,error}
  */
 export function connect(env = {}, options = {}) {
-  const child = spawn(process.execPath, [SERVER], {
+  const child = registerChild(spawn(process.execPath, [SERVER], {
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: options.cwd,
     env: { ...process.env, ...env },
-  });
+  }));
   let nextId = 1;
   const pending = new Map();
   let stdoutBuf = '';

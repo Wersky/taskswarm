@@ -16,6 +16,7 @@
  *   node scripts/coverage.mjs --no-run        # 复用已有 NODE_V8_COVERAGE 数据
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -31,9 +32,12 @@ const noRun = patterns.includes('__NO_RUN__');
 const testPatterns = patterns.filter(p => p !== '__NO_RUN__');
 if (testPatterns.length === 0) testPatterns.push('mcp/test/*.test.mjs');
 
-// 覆盖率数据目录：优先 D 盘（本机约定不写 C 盘）
-const covRoot = process.env.TASKSWARM_COV_DIR || path.join('D:/zcode-work/daily/_swarm-tmp', 'coverage');
-const covDir = fs.mkdtempSync(path.join(fs.mkdirSync(covRoot, { recursive: true }) ?? covRoot, 'v8-'));
+// 覆盖率数据目录：默认系统临时目录（跨平台），可用 TASKSWARM_COV_DIR 覆盖。
+// 刻意不硬编码机器相关路径，否则别人克隆后跑 `npm run coverage` 会失败。
+const covRoot = process.env.TASKSWARM_COV_DIR
+  || fs.mkdtempSync(path.join(os.tmpdir(), 'taskswarm-cov-'));
+fs.mkdirSync(covRoot, { recursive: true });
+const covDir = fs.mkdtempSync(path.join(covRoot, 'v8-'));
 
 // ---------------------------------------------------------------------------
 // 1. 跑测试，让所有子进程写出覆盖率

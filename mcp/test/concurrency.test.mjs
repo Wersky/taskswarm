@@ -14,8 +14,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { connect, makeWorkspace, rmWorkspace, SERVER } from './helpers.mjs';
+import { connect, makeWorkspace, rmWorkspace } from './helpers.mjs';
 
 /** 起一个独立 server 进程，返回该进程专属的连接（模拟不同子代理会话）。 */
 function worker(ws) {
@@ -407,20 +406,10 @@ describe('server.mjs 可独立启动（可移植性冒烟）', () => {
     // 用一个与 server.mjs 无关的 cwd 启动，验证不依赖 process.cwd()
     const tmpCwd = makeWorkspace('cwd');
     try {
-      const child = spawn(process.execPath, [SERVER], { stdio: ['pipe', 'pipe', 'pipe'], cwd: tmpCwd });
-      const out = await new Promise((resolve, reject) => {
-        let buf = '';
-        const timer = setTimeout(() => reject(new Error('启动超时（10s）')), 10000);
-        child.stdout.on('data', (b) => {
-          buf += b.toString();
-          if (buf.includes('\n')) { clearTimeout(timer); resolve(buf); }
-        });
-        child.stderr.on('data', (b) => { /* 仅用于诊断 */ });
-        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
-      });
-      const msg = JSON.parse(out.trim().split('\n')[0]);
-      assert.equal(msg.result.serverInfo.name, 'taskswarm');
-      child.kill();
+      const c = connect({}, { cwd: tmpCwd });
+      const res = await c.rpc('initialize', {});
+      assert.equal(res.result.serverInfo.name, 'taskswarm');
+      c.kill();
     } finally { rmWorkspace(tmpCwd); }
   });
 });

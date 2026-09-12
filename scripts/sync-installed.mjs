@@ -15,7 +15,7 @@
  * 可选参数：
  *   --source <dir>        源目录（默认：本脚本的上上级目录）
  *   --cache-root <dir>    插件缓存根（默认：<用户主目录>/.zcode/cli/plugins/cache）
- *   --marketplace <name>  市场名（默认：wersky-local）
+ *   --marketplace <name>  市场名（默认：自动探测缓存中含 taskswarm 的市场目录）
  *
  * 排除项：状态落盘目录「任务蜂群/」、_swarm-tmp/、node_modules/、.git/、
  *         *.tmp-* / *.corrupt-*.json / *.lock / .lock / 日志与系统噪音文件。
@@ -49,7 +49,7 @@ const HELP = `用法：node scripts/sync-installed.mjs [选项]
   --targets <v1,v2>     指定版本目录（默认：当前版本 + 缓存中已存在的版本目录）
   --source <dir>        源目录（默认：本脚本的上上级目录）
   --cache-root <dir>    插件缓存根（默认：<用户主目录>/.zcode/cli/plugins/cache）
-  --marketplace <name>  市场名（默认：wersky-local）
+  --marketplace <name>  市场名（默认：自动探测缓存中含 taskswarm 的市场目录）
   -h, --help            显示本帮助
 
 排除项：状态落盘目录「任务蜂群/」、_swarm-tmp/、node_modules/、.git/，
@@ -58,7 +58,7 @@ const HELP = `用法：node scripts/sync-installed.mjs [选项]
 
 // ---------- 参数解析 ----------
 function parseArgs(argv) {
-  const opts = { check: false, dryRun: false, prune: false, targets: null, source: null, cacheRoot: null, marketplace: 'wersky-local' };
+  const opts = { check: false, dryRun: false, prune: false, targets: null, source: null, cacheRoot: null, marketplace: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -173,6 +173,32 @@ function listInstalledVersions(pluginRoot) {
   }
 }
 
+/**
+ * 探测 taskswarm 装在哪个市场目录下。
+ *
+ * 市场名由使用者自己起（本机是 wersky-local，别人可能叫别的），因此不能写死默认值：
+ * 在缓存根下扫描一层，找哪个市场目录里含有 taskswarm。找不到时退回 'wersky-local'
+ * 并在提示里告知可用 --marketplace 指定。
+ */
+function detectMarketplace(cacheRoot) {
+  try {
+    const hit = fs.readdirSync(cacheRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .find((name) => {
+        try {
+          return fs.existsSync(path.join(cacheRoot, name, 'taskswarm'));
+        } catch {
+          return false;
+        }
+      });
+    if (hit) return hit;
+  } catch {
+    // 缓存根不存在（尚未安装过插件）：用默认名，后续会给出清晰报错
+  }
+  return 'wersky-local';
+}
+
 // ---------- 主流程 ----------
 const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 
@@ -199,7 +225,8 @@ function main() {
   }
 
   const currentVersion = readVersion(source);
-  const pluginRoot = path.join(cacheRoot, opts.marketplace, 'taskswarm');
+  const marketplace = opts.marketplace || detectMarketplace(cacheRoot);
+  const pluginRoot = path.join(cacheRoot, marketplace, 'taskswarm');
 
   // 目标版本：显式 --targets > 当前版本 + 缓存中已存在的版本目录（保证老版本安装不被漏掉）
   let targets;
@@ -226,7 +253,7 @@ function main() {
 
   console.log(`[sync-installed] 源        : ${source}`);
   console.log(`[sync-installed] 缓存根    : ${cacheRoot}`);
-  console.log(`[sync-installed] 插件      : taskswarm@${opts.marketplace}`);
+  console.log(`[sync-installed] 插件      : taskswarm@${marketplace}`);
   console.log(`[sync-installed] 当前版本  : ${currentVersion || '(未知)'}`);
   console.log(`[sync-installed] 目标版本  : ${targets.join(', ')}`);
   console.log(`[sync-installed] 待同步文件: ${files.length} 个（已排除状态目录与临时文件）`);

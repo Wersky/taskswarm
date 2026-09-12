@@ -37,7 +37,7 @@ function workspaceOf(args) {
   const ws = args?.workspace;
   if (ws === undefined || ws === null || ws === '') return '';
   if (typeof ws !== 'string') {
-    throw new Error(`workspace 必须是字符串（当前类型：${Array.isArray(ws) ? 'array' : typeof ws}）。下一步：传入工作区路径字符串，例如 {"workspace":"D:/zcode-work/my-project"}。`);
+    throw new Error(`workspace 必须是字符串（当前类型：${Array.isArray(ws) ? 'array' : typeof ws}）。下一步：传入工作区路径字符串，例如 {"workspace":"/path/to/my-project"}。`);
   }
   return ws.trim();
 }
@@ -202,6 +202,34 @@ function withStateLock(args, fn) {
  * 原子写盘：tmp 文件 → fsync → rename 覆盖（同目录 rename 在 Windows/POSIX 均为原子）。
  * 调用方必须已持有跨进程锁（经 withStateLock）。
  */
+/** rename 遇到这些错误码时值得重试：Windows 上目标文件被其他进程短暂持有（并发读者/杀毒扫描）会瞬时报 EPERM */
+const RENAME_TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+/**
+ * 原子替换写盘：写 <file>.tmp-<pid> → fsync → rename 覆盖。
+ *
+ * rename 在 Windows 上有经典的瞬态失败：目标文件此刻被另一个进程打开着
+ * （并发的 readFileSync 读者、杀毒软件实时扫描），rename 会报 EPERM/EACCES/EBUSY。
+ * Linux 上不存在该问题，因此本机测试可能一次都不触发——这正是"别人克隆后
+ * 才遇到的 bug"。处理：短退避重试（25ms 起、最多 ~2s），期间目标文件保持
+ * 完整旧版，原子性不受影响；重试耗尽才报错。
+ */
+function renameWithRetry(tmp, f) {
+  const delays = [25, 50, 100, 200, 400, 500, 700];
+  let lastErr = null;
+  for (let i = 0; i <= delays.length; i++) {
+    try {
+      fs.renameSync(tmp, f);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!RENAME_TRANSIENT.has(err?.code) || i === delays.length) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[i]);
+    }
+  }
+  throw lastErr;
+}
+
 function writeState(args, state) {
   const f = stateFile(args);
   fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -215,7 +243,7 @@ function writeState(args, state) {
     try { fs.closeSync(fd); } catch { /* ignore */ }
   }
   try {
-    fs.renameSync(tmp, f);
+    renameWithRetry(tmp, f);
   } catch (err) {
     try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
     throw new Error(`状态文件写入失败（重命名未生效）：${f}（${err?.message ?? err}）`);
