@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="660" viewBox="0 0 1080 660" font-family="Helvetica, Arial, 'Microsoft YaHei', sans-serif">
+  <rect width="1080" height="660" fill="#ffffff"/>
+
+  <defs>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#82b366"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c8ebf"/>
+    </marker>
+    <marker id="arrowGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#666666"/>
+    </marker>
+  </defs>
+
+  <rect x="40" y="30" width="300" height="96" rx="8" fill="#dae8fc" stroke="#6c8ebf" stroke-width="2"/>
+  <text x="190" y="66" text-anchor="middle" font-size="15" font-weight="bold" fill="#1a3a5c">主代理（编排循环）</text>
+  <text x="190" y="92" text-anchor="middle" font-size="12" fill="#2b5b86">拆解 → 波次派发 → 收波转发 → 汇总</text>
+  <text x="190" y="112" text-anchor="middle" font-size="10" fill="#5a7a99">唯一的调度器：ZCode 无插件级调度 API</text>
+
+  <rect x="700" y="30" width="330" height="250" rx="8" fill="#e8f5e9" stroke="#82b366" stroke-width="2"/>
+  <rect x="700" y="30" width="330" height="34" rx="8" fill="#d5e8d4" stroke="#82b366" stroke-width="2"/>
+  <text x="865" y="53" text-anchor="middle" font-size="13" font-weight="bold" fill="#2d5a2d">子代理池（各自独立会话）</text>
+  <rect x="726" y="80" width="124" height="48" rx="6" fill="#ffffff" stroke="#82b366"/>
+  <text x="788" y="110" text-anchor="middle" font-size="12" fill="#2d5a2d">agent-1</text>
+  <rect x="874" y="80" width="124" height="48" rx="6" fill="#ffffff" stroke="#82b366"/>
+  <text x="936" y="110" text-anchor="middle" font-size="12" fill="#2d5a2d">agent-2</text>
+  <rect x="726" y="142" width="124" height="48" rx="6" fill="#ffffff" stroke="#82b366"/>
+  <text x="788" y="172" text-anchor="middle" font-size="12" fill="#2d5a2d">agent-3</text>
+  <rect x="874" y="142" width="124" height="48" rx="6" fill="#ffffff" stroke="#82b366"/>
+  <text x="936" y="172" text-anchor="middle" font-size="12" fill="#2d5a2d">agent-4</text>
+  <text x="865" y="216" text-anchor="middle" font-size="11" fill="#d9534f">实测：没有 SendMessage / Agent 工具</text>
+  <text x="865" y="234" text-anchor="middle" font-size="11" fill="#d9534f">→ 子代理之间无法直接通信</text>
+  <text x="865" y="258" text-anchor="middle" font-size="10" fill="#777777">（这正是本插件要解决的核心约束）</text>
+
+  <rect x="330" y="330" width="440" height="240" rx="8" fill="#fff2cc" stroke="#d6b656" stroke-width="2"/>
+  <rect x="330" y="330" width="440" height="36" rx="8" fill="#ffe6b3" stroke="#d6b656" stroke-width="2"/>
+  <text x="550" y="354" text-anchor="middle" font-size="13" font-weight="bold" fill="#7a5c00">taskswarm MCP Server｜零依赖 Node · stdio JSON-RPC · 10 工具</text>
+
+  <rect x="352" y="382" width="190" height="58" rx="6" fill="#ffffff" stroke="#d6b656"/>
+  <text x="447" y="405" text-anchor="middle" font-size="12" fill="#7a5c00">任务树与依赖</text>
+  <text x="447" y="425" text-anchor="middle" font-size="10" fill="#9a8030">plan_create / plan_get</text>
+  <rect x="558" y="382" width="190" height="58" rx="6" fill="#ffffff" stroke="#d6b656"/>
+  <text x="653" y="405" text-anchor="middle" font-size="12" fill="#7a5c00">原子领取与状态机</text>
+  <text x="653" y="425" text-anchor="middle" font-size="10" fill="#9a8030">task_claim / task_update</text>
+
+  <rect x="352" y="454" width="190" height="58" rx="6" fill="#ffffff" stroke="#d6b656"/>
+  <text x="447" y="477" text-anchor="middle" font-size="12" fill="#7a5c00">看板与笔记全文</text>
+  <text x="447" y="497" text-anchor="middle" font-size="10" fill="#9a8030">board / task_notes 分页</text>
+  <rect x="558" y="454" width="190" height="58" rx="6" fill="#ffffff" stroke="#d6b656"/>
+  <text x="653" y="477" text-anchor="middle" font-size="12" fill="#7a5c00">跨进程文件锁 + 原子写</text>
+  <text x="653" y="497" text-anchor="middle" font-size="10" fill="#9a8030">withStateLock / writeState</text>
+  <text x="550" y="540" text-anchor="middle" font-size="10" fill="#9a8030">失败语义 failurePolicy · 深度 ≤ 5 · id 校验 · 状态机守卫</text>
+
+  <path d="M 190 126 L 190 200 L 500 200 L 500 330" fill="none" stroke="#6c8ebf" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="300" y="193" text-anchor="middle" font-size="11" fill="#3d6b96">调用工具编排（何时拆 / 派给谁 / 何时收波）</text>
+
+  <path d="M 340 60 L 700 60" fill="none" stroke="#82b366" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="520" y="46" text-anchor="middle" font-size="11" fill="#4d7d4d">② 主代理推送：SendMessage 转发关键产出</text>
+  <text x="520" y="76" text-anchor="middle" font-size="10" fill="#6b9b6b">（实测可达运行中的子代理会话）</text>
+
+  <path d="M 700 240 L 620 240 L 620 330" fill="none" stroke="#82b366" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="660" y="290" text-anchor="middle" font-size="11" fill="#4d7d4d" transform="rotate(-90 660 290)">①</text>
+  <text x="600" y="272" text-anchor="end" font-size="11" fill="#4d7d4d">① 看板拉取（默认通道）</text>
+  <text x="600" y="290" text-anchor="end" font-size="10" fill="#6b9b6b">task_claim 领任务 · task_update 写进展</text>
+  <text x="600" y="306" text-anchor="end" font-size="10" fill="#6b9b6b">board 看全队 · task_notes 读全文</text>
+
+  <rect x="420" y="600" width="270" height="52" rx="6" fill="#f5f5f5" stroke="#666666" stroke-width="1.5"/>
+  <text x="555" y="622" text-anchor="middle" font-size="12" fill="#444444">状态文件 swarm-state.json + .lock</text>
+  <text x="555" y="640" text-anchor="middle" font-size="10" fill="#666666">原子替换写盘 · 损坏自动备份 · 多进程安全</text>
+  <path d="M 550 570 L 550 600" fill="none" stroke="#666666" stroke-width="2" marker-end="url(#arrowGray)"/>
+</svg>

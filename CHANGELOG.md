@@ -13,25 +13,42 @@
 
 ### Fixed
 
-- **并发写坏状态文件**：多个子代理同时调用 `task_update` / `task_claim` 时，对 `任务蜂群/swarm-state.json` 的读-改-写会互相覆盖，导致任务树丢失或 JSON 解析失败。改为「文件锁串行化 + 临时文件 `write → fsync → rename` 原子替换」，并在读取端做严格校验（坏文件不再被静默吞掉）。（实测缺陷，由 1.0.0 的 `fs.writeFileSync` 直写复现）
-- **并发双重领取**：两个子代理几乎同时 `task_claim` 同一个任务时，双方都能领取成功，出现重复派发。改为在锁内完成「读取 → 检查状态 → 写入」的完整判定，保证原子性。（实测缺陷）
-- **跨机器不可运行**：`plugin.json` 硬编码本机路径 `D:\nodejs\node.exe` 与 `D:\zcode-data\plugins\taskswarm\mcp\server.mjs`，换台机器或换用户名即启动失败。改为裸 `node` + `${ZCODE_PLUGIN_ROOT}` 占位符与 `cwd: ${ZCODE_PROJECT_DIR}`。
+- **并发写坏状态文件**：多个子代理同时调用 `task_update` / `task_claim` 时，对 `任务蜂群/swarm-state.json` 的读-改-写会互相覆盖，导致任务树丢失或 JSON 解析失败。改为「跨进程文件锁串行化 + 临时文件 `write → fsync → rename` 原子替换」。（实测：两进程各写 120 条笔记会使文件损坏、期间 217 次工具报错；修复后 120/120 无丢失、0 次报错）
+- **并发双重领取**：两个子代理几乎同时 `task_claim` 同一个任务时，双方都能领取成功，出现重复派发。改为在锁内完成「读取 → 检查状态 → 写入」的完整判定。（实测：60 次并发抢占曾出现 4 次双重领取；修复后为 0 次）
+- **状态文件损坏被静默吞掉**：解析失败时只报「没有进行中的蜂群任务」，原计划静默丢失且无备份。现在先把坏文件备份为 `<file>.corrupt-<时间戳>.json`，再抛出含备份位置与 `plan_reset` 出路的明确错误。
+- **写入中途被杀留下半截文件**：`fs.writeFileSync` 直接覆盖目标文件，进程在写入窗口被杀即损坏。改为原子替换后，8 次写入中强杀测试零损坏。
+- **笔记无上限**：`notes` 数组无限增长，每次操作全量重写整个状态文件，README/看板返回体量随之失控。现每任务保留最新 500 条、单条上限 4000 字符（可经 `TASKSWARM_MAX_NOTES` / `TASKSWARM_MAX_NOTE_CHARS` 调整），被丢弃条数记账到 `notesDropped`，日志留痕，绝不静默丢弃。
+- **长笔记读不回**：`plan_get` 与 `board` 只提供 60/120 字符截断摘要，写下的完整结论没有任何读取通道。新增只读工具 `task_notes` 分页读回全文。
+- **三级以上嵌套被静默丢弃**：`subtasks` 只展开两层，第三层任务无声消失。现递归展开（深度上限 5），超限给出可行动的报错。
+- **`__proto__` 等危险 id 导致任务消失**：任务表使用普通对象，`id: "__proto__"` 会命中原型、任务在落盘后凭空消失。现对 id 做字符集与保留名校验，任务表改用 `Object.create(null)`，内部判定统一 `Object.hasOwn`。
+- **上游失败仍派发下游**：代码注释声称「其依赖它的任务永久就绪阻断」，实测行为相反——上游 `failed` 后下游照常进入就绪列表。现默认 `failurePolicy: "block"` 真正阻断（`task_claim` 也会拦住并说明原因），可选 `"proceed"` 放行并在 `task_ready` 中标注 `blockedBy`。
+- **状态机无守卫**：任何人可修改任意任务、终态可被任意回退、`done` 任务可被重新领取。现引入转移表与 owner 校验；恢复失联子代理的任务需显式 `force:true`（会在 log 留下「强制改状态」审计事件，记录操作者与原 owner）。
+- **入参校验缺失导致内部异常外泄**：非法 `dependsOn`、错误类型的 `workspace`、非法的 `limit` / `offset` 会抛出 `Cannot read properties of ...` / `is not iterable` 等内部异常。现所有入口先做类型检查，错误信息统一为「发生了什么 + 下一步怎么做」。
+- **`board` 的 `activeWorkers` 未按 owner 过滤**：指定 `owner` 时 `view` 被过滤但 `activeWorkers` 仍包含他人任务，过滤形同虚设。已修正为一致过滤。
+- **`serverInfo.version` 与 manifest 不一致**：`initialize` 响应里硬编码 `1.0.0`，而 manifest 已是 `2.0.0`。现提取为 `SERVER_VERSION` 常量，并由测试断言两者一致以防再次漂移。
 
 ### Added
 
-- `package.json`：零依赖（`dependencies` / `devDependencies` 均为空），`type: module`，`engines.node >= 18`。
+- **`task_notes` 工具**：只读、分页（`limit` 默认 20、上限 200，`offset` 从最新往回数），返回笔记全文与 `total` / `notesDropped` / `hasMore` 等字段。
+- **`failurePolicy` 计划级选项**：`"block"`（默认）| `"proceed"`，决定上游失败时下游是否放行。
+- **`task_update` 的 `force` 参数**：供主代理在会话中断恢复场景下接管任务；必须同时提供 `owner`，且写入审计日志。
+- **测试套件 `mcp/test/`（91 个测试，全绿）**：协议层、入参校验、状态机与归属守卫、失败语义、笔记治理与分页、多进程并发（原子领取 / 状态不丢 / 崩溃恢复）、锁的故障路径、IO 故障注入。全部通过 `spawn` 真实子进程运行——并发承诺只在独立进程间才成立。
+- **`scripts/coverage.mjs`**：基于 `NODE_V8_COVERAGE` 的子进程覆盖率统计（Node 内置的 `--experimental-test-coverage` 看不到子进程里执行的代码，直接跑会得到空报告）。当前：行覆盖 86.8%、函数覆盖 96.4%。
+- `package.json`：零依赖（`dependencies` / `devDependencies` 均为空），`type: module`，`engines.node >= 18`，`scripts.test` / `scripts.coverage` / `scripts.sync`。
 - `LICENSE`：MIT 全文（Copyright (c) 2026 Wersky），与 manifest 声明一致。
-- `.gitignore`：忽略状态落盘目录 `任务蜂群/`、临时与临时损坏文件、`_swarm-tmp/`、锁文件、`node_modules/`。
+- `.gitignore`：忽略状态落盘目录 `任务蜂群/`、临时与损坏文件、`_swarm-tmp/`、锁文件、`node_modules/`。
 - `.editorconfig`：UTF-8 / LF / 2 空格缩进，匹配现有代码风格。
-- `CHANGELOG.md`：本文件。
-- `scripts/sync-installed.mjs`：把源目录同步到 ZCode 已安装插件缓存，避免源与缓存两份拷贝漂移（排除状态目录与临时文件，打印同步清单）。
-- `mcp/test/` 测试目录：由 `node --test` 发现（本次 2.0.0 起引入；`mcp/test.mjs` 保留为整链路冒烟测试）。
+- `docs/architecture.svg` + `docs/architecture.drawio`：架构图（职责分工与双通道互通机制），SVG 供 README 内嵌，drawio 供再编辑。
+- `scripts/sync-installed.mjs`：把源目录同步到 ZCode 已安装插件缓存，避免源与缓存两份拷贝漂移（排除状态目录与临时文件，支持 `--check` / `--dry-run`）。
 
 ### Changed
 
-- `plugin.json` 版本 `1.0.0` → `2.0.0`；`description` / `description_i18n` 措辞更新（补充英文描述与「零依赖」卖点）。
-- 测试入口改为 `npm test`（`node --test` 的 glob 写法，Node 18+ 通用），旧的 `node mcp/test.mjs` 保留为整链路冒烟脚本。
-- 状态文件的写入路径、锁文件与临时文件命名约定固化，并在 `.gitignore` 中屏蔽。
+- `plugin.json` 版本 `1.0.0` → `2.0.0`；`description` / `description_i18n` 更新（补充英文描述与「零依赖」卖点）。
+- **可移植性**：`plugin.json` 去掉硬编码的 `D:\nodejs\node.exe` 与源目录绝对路径，改为裸 `node` + `${ZCODE_PLUGIN_ROOT}` 占位符 + `cwd: ${ZCODE_PROJECT_DIR}`。
+- **测试入口**：`npm test` 使用 `node --test` 的引号 glob 写法（Node 24 把位置参数当 glob 解析，直接传目录会 `MODULE_NOT_FOUND`）。旧的自制断言脚本 `mcp/test.mjs` 与 `mcp/test-concurrency.mjs` 已删除——断言全部迁入 `mcp/test/`，其中原版 `board 按 owner 过滤` 的恒真断言（`!A || B`）已重写为真会失败的断言。
+- **文档纠错**：`SKILL.md` 与 `commands/swarm.md` 中的工具名前缀 `mcp__taskswarm__*` 改为真实前缀 `mcp__plugin_taskswarm_taskswarm__*`；修正「`plan_get` 返回 `active` 字段」的错误描述（该字段只在 `board` 上，且无计划时 `plan_get` 会报错）；补充失败语义、`force` 恢复流程、`task_notes` 用法、`force` 的权限边界说明。
+- 状态文件的写入路径、锁文件（`.lock`）与临时文件（`*.tmp-<pid>`）命名约定固化，并在 `.gitignore` 中屏蔽。
+- 锁超时改为可配置（`TASKSWARM_LOCK_TIMEOUT_MS`，默认 10000ms），便于测试与部署调整。
 
 [Unreleased]: https://github.com/Wersky/taskswarm/compare/v2.0.0...HEAD
 [2.0.0]: https://github.com/Wersky/taskswarm/releases/tag/v2.0.0

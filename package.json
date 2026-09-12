@@ -41,8 +41,8 @@
     "skills"
   ],
   "scripts": {
-    "test": "node --test \"mcp/**/*.test.mjs\" \"mcp/test/**/*.mjs\" \"mcp/test/**/*.js\" \"mcp/test/**/*.cjs\"",
-    "test:legacy": "node mcp/test.mjs",
+    "test": "node --test \"mcp/test/**/*.test.mjs\"",
+    "coverage": "node scripts/coverage.mjs",
     "sync": "node scripts/sync-installed.mjs"
   }
 }
