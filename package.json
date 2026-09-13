@@ -1,6 +1,6 @@
 {
   "name": "taskswarm",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "TaskSwarm: recursive task decomposition, wave-based parallel subagent dispatch, and a shared MCP progress board. Zero dependencies, Node >= 18. Includes a PPR review gate: a task with a reviewer stays blocked (downstream cannot start) until the reviewer approves.",
   "type": "module",
   "license": "MIT",

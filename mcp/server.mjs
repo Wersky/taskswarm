@@ -28,7 +28,7 @@ import readline from 'node:readline';
  * serverInfo.version —— 必须与 package.json / .zcode-plugin/plugin.json 一致（当前 2.0.0）。
  * 有意写成常量而非读 package.json：保持零依赖与零启动 I/O（升级时三处一起改）。
  */
-const SERVER_VERSION = '2.1.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
+const SERVER_VERSION = '2.2.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
 
 // ---------------------------------------------------------------------------
 // 落盘位置：<工作区>/任务蜂群/（由调用方传 workspace，默认 cwd）
@@ -416,9 +416,37 @@ function normalizeRole(value) {
  */
 function normalizeReviewer(value) {
   if (value === undefined || value === null) return null;
-  const s = String(value).trim();
+  // ⚠️ 刻意拒绝非字符串而不是 String() 强转：强转会把 {x:1} 变成 "[object Object]"
+  // 这种"看着像身份、实际永不可用"的脏值静默写进任务——探测到该任务从此没有
+  // 合法裁决者，审核门只能靠 force 绕过，且跨机器场景下极难排查（实测踩过）。
+  if (typeof value !== 'string') {
+    const kind = Array.isArray(value) ? 'array' : typeof value;
+    throw new Error(`reviewer 必须是字符串（当前类型：${kind}）。下一步：传身份字符串，例如 "wersky/agent-3"；不指定则该任务无审核门，省略此字段即可。`);
+  }
+  const s = value.trim();
   if (s === '') return null;
   if (s.length > 80) throw new Error(`reviewer 身份过长（${s.length} > 80）。下一步：用简短身份，如 "wersky/agent-3"。`);
+  return s;
+}
+
+/**
+ * assignee 归一化：**建议**执行者身份（如 "wersky/agent-3"），可为空。
+ *
+ * 与 reviewer 的关键区别：reviewer 触发审核门（机制），assignee 只是提示（标签）——
+ * 它不影响 task_claim 的领取权限，谁干仍由 claim 时的 owner 决定。这样主代理可以在
+ * 拆解计划时就「建议」分工，同时保留执行中途换人的自由。
+ * 省略 → null（旧状态文件缺该字段按 null 读，向后兼容）。
+ */
+function normalizeAssignee(value) {
+  if (value === undefined || value === null) return null;
+  // 与 reviewer 同样的类型守卫：拒绝非字符串，避免 "[object Object]" 这类脏值进树
+  if (typeof value !== 'string') {
+    const kind = Array.isArray(value) ? 'array' : typeof value;
+    throw new Error(`assignee 必须是字符串（当前类型：${kind}）。下一步：传身份字符串，例如 "wersky/agent-3"；不需要建议执行者时省略该字段。`);
+  }
+  const s = value.trim();
+  if (s === '') return null;
+  if (s.length > 80) throw new Error(`assignee 身份过长（${s.length} > 80）。下一步：用简短身份，如 "wersky/agent-3"。`);
   return s;
 }
 
@@ -440,6 +468,57 @@ function normalizeDeps(args, where) {
     if (!out.includes(s)) out.push(s);
   }
   return out;
+}
+
+/**
+ * proposals 归一化（task_review 采纳提案用）：把审核者提出的新计划项规整成
+ * 一串可直接交给 addTaskNode 的 spec。
+ *
+ * 为什么在采纳前先做一遍类型检查而不是直接喂给 addTaskNode：
+ * 采纳必须**原子**——任一项不合法就整批不加。只有先把「项本身是不是对象、title 有没有」
+ * 这类一眼可判的问题全部查完，才能保证 addTaskNode 阶段不会中途抛错留下半批任务
+ * （例如第 3 项的 dependsOn 指向不存在的任务，此时前 2 项已经进树了）。
+ *
+ * 错误信息一律带 `proposals[i]` 与「怎么改」，让 reviewer 一次就能改对。
+ */
+function normalizeProposals(value, where) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    const kind = value === null ? 'null' : typeof value === 'object' ? 'object' : typeof value;
+    throw new Error(`${where}: proposals 必须是数组（当前类型：${kind}）。下一步：改为 [{"title":"..."}] 形式，或省略该字段。`);
+  }
+  return value.map((p, i) => {
+    const at = `${where}: proposals[${i}]`;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) {
+      const kind = p === null ? 'null' : Array.isArray(p) ? 'array' : typeof p;
+      throw new Error(`${at} 必须是对象（当前类型：${kind}）。下一步：写成 {"title":"提案标题","detail":"..."}。`);
+    }
+    const title = String(p.title ?? '').trim();
+    if (title === '') {
+      throw new Error(`${at} 缺少 title（或 title 为空）。下一步：补上任务标题，例如 {"title":"补一个并发回归测试","detail":"覆盖 …","assignee":"wersky/agent-3"}。`);
+    }
+    // 坑：normalizeRole/normalizeReviewer/normalizeAssignee 的错误文案不带 proposals 下标
+    // （它们原本服务于 plan_create/task_add），批量采纳时必须补上「第几项」，
+    // 否则 reviewer 拿到「role 非法」根本不知道要改哪一条提案。
+    // normalizeDeps/assertValidId/requireString 已经接收 where 参数，下面的 at 已带上，无需再包。
+    const withIndex = (fn) => {
+      try { return fn(); }
+      catch (err) { throw new Error(`${at}: ${err?.message ?? err}`); }
+    };
+    const id = p.id === undefined || p.id === null || String(p.id).trim() === '' ? '' : assertValidId(String(p.id).trim(), at);
+    const parentId = p.parentId === undefined || p.parentId === null || String(p.parentId).trim() === ''
+      ? '' : requireString(p.parentId, `${at}: parentId`).trim();
+    return {
+      id,
+      title,
+      detail: p.detail === undefined || p.detail === null ? '' : String(p.detail).trim(),
+      dependsOn: normalizeDeps(p, at),
+      parentId,
+      role: withIndex(() => normalizeRole(p.role)),
+      reviewer: withIndex(() => normalizeReviewer(p.reviewer)),
+      assignee: withIndex(() => normalizeAssignee(p.assignee)),
+    };
+  });
 }
 
 /**
@@ -657,6 +736,8 @@ function planCreate(args) {
       // 才进入 pending（见 taskUpdate 里的审核门逻辑）。
       role: normalizeRole(t.role),
       reviewer: normalizeReviewer(t.reviewer),
+      // assignee 只是「建议执行者」提示（不参与领取权限）
+      assignee: normalizeAssignee(t.assignee),
       reviewStage: 'none',
       notes: [],
       createdAt: new Date().toISOString(),
@@ -703,7 +784,7 @@ function detectCycle(state) {
   const visiting = new Set(), visited = new Set();
   function dfs(id) {
     if (visited.has(id)) return;
-    if (visiting.has(id)) throw new Error(`plan_create: 依赖关系存在环，涉及 ${id}`);
+    if (visiting.has(id)) throw new Error(`检测到依赖关系存在环，涉及 ${id}。下一步：检查这些任务的 dependsOn，去掉构成环的那条依赖。`);
     visiting.add(id);
     for (const dep of depsOf(state.tasks[id])) dfs(dep);
     visiting.delete(id);
@@ -723,13 +804,15 @@ function planView(state) {
     const block = blocked.length > 0 ? ` ⛔ 上游失败/跳过: ${blocked.join(', ')}` : '';
     // PPR：显示角色与审核状态，让编排方一眼看到"卡在谁那里"
     const role = t.role && t.role !== 'none' ? ` {${t.role}}` : '';
+    // assignee 是「建议执行者」（提示性），与 owner（实际领取者）区分开显示
+    const assigned = t.assignee ? ` → 建议: ${t.assignee}` : '';
     const review = t.reviewer
       ? (t.reviewStage === 'pending' ? ` ⏳ 待 ${t.reviewer} 审核`
         : t.reviewStage === 'approved' ? ` ✔ ${t.reviewer} 已审`
           : t.reviewStage === 'rejected' ? ` ✖ ${t.reviewer} 已驳回（待重做）`
             : ` 审核:${t.reviewer}`)
       : '';
-    lines.push(`${indent}[${t.id}] (${t.status}) ${t.title}${role}${deps}${review}${block}`);
+    lines.push(`${indent}[${t.id}] (${t.status}) ${t.title}${role}${assigned}${deps}${review}${block}`);
   }
   return lines.join('\n');
 }
@@ -781,6 +864,8 @@ function taskReady(args) {
       const blockedBy = blockingDeps(state, t); // proceed 策略下才有值；block 策略下不会被列进 ready
       return {
         id: t.id, title: t.title, detail: t.detail, parent: t.parent,
+        // assignee 是「建议执行者」提示；实际谁干仍由 task_claim 决定
+        ...(t.assignee ? { assignee: t.assignee } : {}),
         ...(blockedBy.length > 0 ? { blockedBy } : {}),
       };
     }),
@@ -947,50 +1032,74 @@ function taskUpdate(args) {
   });
 }
 
+/**
+ * addTaskNode —— 「建一个任务节点」的纯逻辑，供 task_add 与 task_review 采纳提案共用。
+ *
+ * 只负责往传入的 state 里加节点（校验 + 落字段 + 维护 order/parent.children/nextId + 查环），
+ * **不读盘、不写盘、不开锁**：调用方必须已持有跨进程锁（mutateState/planCreate 的临界区）。
+ * 返回新任务 id；spec 不合法时抛中文错误（文案与 task_add 原有行为一致）。
+ *
+ * spec = {id?, title, detail?, dependsOn?, parentId?, role?, reviewer?, assignee?}
+ *   - id 省略/为空 → 自动编号（跳过已被占用的槽位）
+ *   - dependsOn 必须指向已存在的任务，且不得成环（detectCycle 兜底）
+ *   - role/reviewer/assignee 走各自的 normalize*（未指定分别为 'none'/null/null）
+ */
+function addTaskNode(state, spec, where) {
+  const title = String(spec?.title ?? '').trim();
+  if (title === '') throw new Error(`${where}: title 不能为空。下一步：传入任务标题，例如 {"title":"补一个回归测试","parentId":"T1"}。`);
+  let parent = null;
+  if (spec?.parentId !== undefined && spec?.parentId !== null && String(spec.parentId).trim() !== '') {
+    parent = requireString(spec.parentId, `${where}: parentId`).trim();
+    if (!hasTask(state, parent)) {
+      throw new Error(`${where}: 父任务不存在 ${parent}。下一步：用 board 查看现有任务 id，或省略 parentId 建为顶级任务。`);
+    }
+  }
+  let id;
+  if (spec?.id === undefined || spec?.id === null || String(spec.id).trim() === '') {
+    do { id = `T${state.nextId++}`; } while (hasTask(state, id)); // 跳过被显式 id 占用的槽位
+  } else {
+    id = assertValidId(String(spec.id).trim(), where);
+    if (hasTask(state, id)) {
+      throw new Error(`${where}: 任务 id ${id} 已存在（显式 id 与现有任务或自动编号冲突）。下一步：换一个唯一 id，例如 "${id}-2"；省略 id 则由系统自动编号。`);
+    }
+  }
+  const deps = normalizeDeps(spec, where);
+  // 自身依赖：先建节点还是先查会互相影响，故显式先查这一条（存在性检查排除自身）
+  if (deps.includes(id)) throw new Error(`${where}: 任务 ${id} 依赖自身。下一步：删掉这条 dependsOn。`);
+  assertDepsResolvable(state, id, deps, where);
+  // 字段归一化统一包一层 where 前缀：出错时能定位到是哪个任务的哪个字段
+  // （采纳提案路径会传 `task_review: proposals[i]`，plan_create 传任务上下文）
+  const withWhere = (fn) => {
+    try { return fn(); } catch (err) { throw new Error(`${where}: ${err?.message ?? err}`); }
+  };
+  state.tasks[id] = {
+    id, title,
+    detail: String(spec?.detail ?? '').trim(),
+    dependsOn: deps,
+    parent,
+    depth: parent ? (state.tasks[parent].depth ?? 0) + 1 : 0,
+    children: [],
+    status: 'pending',
+    owner: null,
+    role: withWhere(() => normalizeRole(spec?.role)),
+    reviewer: withWhere(() => normalizeReviewer(spec?.reviewer)),
+    // assignee 只是「建议执行者」提示，不参与领取权限（谁干仍由 task_claim 的 owner 决定）
+    assignee: withWhere(() => normalizeAssignee(spec?.assignee)),
+    reviewStage: 'none',
+    notes: [],
+    createdAt: new Date().toISOString(),
+  };
+  if (parent) state.tasks[parent].children.push(id);
+  state.order.push(id);
+  detectCycle(state);
+  state.log.push({ at: new Date().toISOString(), event: '追加任务', taskId: id, detail: title });
+  return id;
+}
+
 function taskAdd(args) {
   return mutateState(args, (raw) => {
     const state = ensureState(raw);
-    const title = String(args?.title ?? '').trim();
-    if (title === '') throw new Error('task_add: title 不能为空。下一步：传入任务标题，例如 {"title":"补一个回归测试","parentId":"T1"}。');
-    let parent = null;
-    if (args?.parentId !== undefined && args?.parentId !== null && String(args.parentId).trim() !== '') {
-      parent = requireString(args.parentId, 'task_add: parentId').trim();
-      if (!hasTask(state, parent)) {
-        throw new Error(`task_add: 父任务不存在 ${parent}。下一步：用 board 查看现有任务 id，或省略 parentId 建为顶级任务。`);
-      }
-    }
-    let id;
-    if (args?.id === undefined || args?.id === null || String(args.id).trim() === '') {
-      do { id = `T${state.nextId++}`; } while (hasTask(state, id)); // 跳过被显式 id 占用的槽位
-    } else {
-      id = assertValidId(String(args.id).trim(), 'task_add');
-      if (hasTask(state, id)) {
-        throw new Error(`task_add: 任务 id ${id} 已存在（显式 id 与现有任务或自动编号冲突）。下一步：换一个唯一 id，例如 "${id}-2"；省略 id 则由系统自动编号。`);
-      }
-    }
-    const deps = normalizeDeps(args, 'task_add');
-    // 自身依赖：先建节点还是先查会互相影响，故显式先查这一条（存在性检查排除自身）
-    if (deps.includes(id)) throw new Error(`task_add: 任务 ${id} 依赖自身。下一步：删掉这条 dependsOn。`);
-    assertDepsResolvable(state, id, deps, 'task_add');
-    state.tasks[id] = {
-      id, title,
-      detail: String(args?.detail ?? '').trim(),
-      dependsOn: deps,
-      parent,
-      depth: parent ? (state.tasks[parent].depth ?? 0) + 1 : 0,
-      children: [],
-      status: 'pending',
-      owner: null,
-      role: normalizeRole(args?.role),
-      reviewer: normalizeReviewer(args?.reviewer),
-      reviewStage: 'none',
-      notes: [],
-      createdAt: new Date().toISOString(),
-    };
-    if (parent) state.tasks[parent].children.push(id);
-    state.order.push(id);
-    detectCycle(state);
-    state.log.push({ at: new Date().toISOString(), event: '追加任务', taskId: id, detail: title });
+    const id = addTaskNode(state, args, 'task_add');
     return { __save: state, __result: { ok: true, taskId: id } };
   });
 }
@@ -1085,6 +1194,12 @@ function taskNotes(args) {
  *
  * 权限：只允许任务上登记的 reviewer 本人裁决（force:true 供主代理兜底）。
  * 未登记 reviewer 的任务不允许走本工具（它们没有审核门，直接 task_update 置 done 即可）。
+ *
+ * proposals（可选）——「采纳提案」闭环：reviewer 发现问题时可直接提出新计划项，
+ * approve 时它们被**直接加进任务树**，形成「发现问题 → 提建议 → 审核通过 → 自动纳入计划」。
+ * 两条硬规则：
+ *   1. 只有 approve 才采纳；reject 时完全忽略 proposals（驳回不得夹带新任务）；
+ *   2. 采纳**原子**：任一项校验失败则整批不加（先全量校验、再统一建节点）。
  */
 function taskReview(args) {
   return mutateState(args, (raw) => {
@@ -1115,6 +1230,10 @@ function taskReview(args) {
     }
 
     const now = new Date().toISOString();
+    // 采纳提案：只在 approve 时解析（reject 分支根本不读 proposals，杜绝「驳回却夹带新任务」）。
+    // 解析（类型/role/reviewer/assignee/依赖存在性）全部发生在真正建节点之前，
+    // 因此任一项出错时任务树保持原样 —— 这就是采纳的原子性。
+    const proposals = verdict === 'approve' ? normalizeProposals(args?.proposals, 'task_review') : [];
     if (verdict === 'approve') {
       t.status = 'done';
       t.reviewStage = 'approved';
@@ -1139,13 +1258,29 @@ function taskReview(args) {
       state.log.push({ at: now, event: '强制裁决', taskId, owner: actor, detail: `原 reviewer=${t.reviewer}，verdict=${verdict}` });
     }
 
+    // ---- 采纳提案（仅 approve；此前的全部校验已通过，节点逐个建入）----
+    // 注意 log 时序：上面的「审核通过」先入 log，再补「采纳提案」，
+    // 读看板时能看出「先过审、后纳入计划」的因果。
+    const adoptedIds = [];
+    if (proposals.length > 0) {
+      for (const spec of proposals) {
+        adoptedIds.push(addTaskNode(state, spec, `task_review: proposals[${adoptedIds.length}]`));
+      }
+      const at = new Date().toISOString();
+      state.log.push({ at, event: '采纳提案', taskId, owner: actor || t.reviewer, detail: `新增 ${adoptedIds.join(', ')}（由 ${taskId} 的审核通过带出）` });
+    }
+
     return {
       __save: state,
       __result: {
         ok: true,
         task: { id: t.id, status: t.status, reviewStage: t.reviewStage, reviewer: t.reviewer, reviewedBy: actor || t.reviewer },
+        // adopted 恒定存在（未采纳时 {count:0, ids:[]}），调用方无需判空
+        adopted: { count: adoptedIds.length, ids: adoptedIds },
         hint: verdict === 'approve'
-          ? '已通过，下游依赖该任务的任务现在可以派发。'
+          ? (adoptedIds.length > 0
+            ? `已通过，下游依赖该任务的任务现在可以派发；并已采纳 ${adoptedIds.length} 条提案（${adoptedIds.join(', ')}），它们已进入任务树等待派发。`
+            : '已通过，下游依赖该任务的任务现在可以派发。')
           : '已打回，任务回到 in_progress；producer 看到驳回理由后重做，再次交活会重新进入待审核。',
       },
     };
@@ -1214,12 +1349,12 @@ function stateTool(args) {
 // ---------------------------------------------------------------------------
 const TOOLS = [
   {
-    name: 'plan_create', description: '创建蜂群任务：一次多级任务拆解（任务树，含依赖）。goal=总目标；tasks=[{id?,title,detail?,dependsOn?,role?,reviewer?,subtasks:[...]}]（subtasks 最多 5 层）。PPR：给任务配 reviewer 即启用审核门——producer 置 done 会转入 pending_review，必须由 reviewer 用 task_review 通过后下游才放行。failurePolicy 默认 "block"（上游 failed/skipped 时挡住下游）；"proceed" 则照常放行并在 task_ready 里标注 blockedBy。',
+    name: 'plan_create', description: '创建蜂群任务：一次多级任务拆解（任务树，含依赖）。goal=总目标；tasks=[{id?,title,detail?,dependsOn?,role?,reviewer?,assignee?,subtasks:[...]}]（subtasks 最多 5 层）。PPR：给任务配 reviewer 即启用审核门——producer 置 done 会转入 pending_review，必须由 reviewer 用 task_review 通过后下游才放行（task_review 可带 proposals 在过审时直接采纳新计划项）。assignee=建议执行者（仅提示，不影响领取权限）。failurePolicy 默认 "block"（上游 failed/skipped 时挡住下游）；"proceed" 则照常放行并在 task_ready 里标注 blockedBy。',
     inputSchema: {
       type: 'object', required: ['goal', 'tasks'],
       properties: {
         goal: { type: 'string', description: '总目标' },
-        tasks: { type: 'array', items: { type: 'object' }, description: '顶级任务数组，每项 {id?,title,detail?,dependsOn?,role?,reviewer?,subtasks:[{id?,title,detail?,dependsOn?,role?,reviewer?}]}，嵌套最多 5 层。role 取值 planner/producer/reviewer（声明式标签）；reviewer 填身份字符串（如 "wersky/agent-3"）即为该任务启用审核门' },
+        tasks: { type: 'array', items: { type: 'object' }, description: '顶级任务数组，每项 {id?,title,detail?,dependsOn?,role?,reviewer?,assignee?,subtasks:[{id?,title,detail?,dependsOn?,role?,reviewer?,assignee?}]}，嵌套最多 5 层。role 取值 planner/producer/reviewer（声明式标签）；reviewer 填身份字符串（如 "wersky/agent-3"）即为该任务启用审核门；assignee 填身份字符串表示建议由谁执行（仅提示）' },
         failurePolicy: { type: 'string', enum: ['block', 'proceed'], description: '上游 failed/skipped 时下游的处理策略：block（默认）挡住，proceed 放行并标注 blockedBy' },
       },
     },
@@ -1254,7 +1389,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'task_add', description: '执行中途追加任务（支持多级拆解持续发生）。{title,detail?,dependsOn?,parentId?,role?,reviewer?}。配 reviewer 即启用 PPR 审核门。',
+    name: 'task_add', description: '执行中途追加任务（支持多级拆解持续发生）。{title,detail?,dependsOn?,parentId?,role?,reviewer?,assignee?}。配 reviewer 即启用 PPR 审核门；assignee 只是建议执行者的提示，不影响领取权限。',
     inputSchema: {
       type: 'object', required: ['title'],
       properties: {
@@ -1264,6 +1399,7 @@ const TOOLS = [
         parentId: { type: 'string' },
         role: { type: 'string', enum: ['planner', 'producer', 'reviewer'], description: 'PPR 角色标签（声明式，可选）' },
         reviewer: { type: 'string', description: '指定审核者身份（如 "wersky/agent-3"）；填了即启用审核门' },
+        assignee: { type: 'string', description: '建议执行者身份（如 "wersky/agent-3"），仅作提示；实际谁干由 task_claim 决定' },
       },
     },
   },
@@ -1279,13 +1415,14 @@ const TOOLS = [
     },
   },
   {
-    name: 'task_review', description: 'PPR 审核门裁决（reviewer 专用）：对处于「待审核」的任务给出通过（approve）或打回（reject）。approve → 任务转 done、下游放行；reject → 任务回到 in_progress 重做、下游继续阻断（reason 必填）。仅任务上登记的 reviewer 本人可裁决（主代理可用 force:true 代裁）。',
+    name: 'task_review', description: 'PPR 审核门裁决（reviewer 专用）：对处于「待审核」的任务给出通过（approve）或打回（reject）。approve → 任务转 done、下游放行；reject → 任务回到 in_progress 重做、下游继续阻断（reason 必填）。可选 proposals：审核时提出的新计划项，**仅 approve 时被采纳并直接加进任务树**，reject 时完全忽略；采纳是原子的（任一项不合法则整批不加）。仅任务上登记的 reviewer 本人可裁决（主代理可用 force:true 代裁）。',
     inputSchema: {
       type: 'object', required: ['taskId', 'verdict'],
       properties: {
         taskId: { type: 'string', description: '要裁决的任务 id' },
         verdict: { type: 'string', description: 'approve（通过）或 reject（打回重做）' },
         reason: { type: 'string', description: 'reject 时必填：写明要改什么（会写入任务笔记，producer 据此重做）' },
+        proposals: { type: 'array', items: { type: 'object' }, description: '可选：审核通过时要采纳的新计划项，每项 {id?,title,detail?,dependsOn?,role?,reviewer?,assignee?,parentId?}，title 必填；仅 approve 时采纳，任一项不合法则整批不加' },
         owner: { type: 'string', description: '裁决者身份，必须与任务登记的 reviewer 一致' },
         force: { type: 'boolean', description: '主代理代裁用（跳过 reviewer 身份校验，会记 log）' },
       },

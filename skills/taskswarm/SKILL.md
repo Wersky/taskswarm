@@ -28,7 +28,7 @@ description: 任务蜂群（多级任务拆解 + 并行子代理编排）。当�
 | `task_update` | 子代理/主代理 | 汇报状态 + 进展笔记；主代理恢复死任务用 `force:true` |
 | `task_notes` | 所有人 | **读回某任务笔记全文**（分页，`limit ≤ 200`）——`plan_get`/`board` 只给摘要 |
 | `task_add` | 主代理/子代理 | 执行中途追加任务（多级拆解持续发生） |
-| `task_review` | reviewer | **PPR 审核裁决**：`approve` 通过（下游放行）/ `reject` 打回（须给 reason，任务回 in_progress） |
+| `task_review` | reviewer | **PPR 审核裁决**：`approve` 通过（下游放行，可带 `proposals` 采纳新计划项）/ `reject` 打回（须给 reason，任务回 in_progress） |
 | `board` | 所有人 | **共享进度看板**：状态、负责人、最新笔记摘要 |
 | `plan_reset` / `state` | 主代理 | 重开 / 状态落盘与恢复 |
 
@@ -62,6 +62,33 @@ producer 置 done ──▶ 审核门改道 pending_review ──▶ 下游被�
 对方用 `bridge_send {type:"plan", data:{plan:[{id,title,role,reviewer,dependsOn}], reviewer}}` 发来计划时：
 把 `data.plan` 逐项转成本地 `plan_create` 的 tasks（`role`/`reviewer` 原样带入）→ 本地跑 PPR → 完成后 `bridge_reply {type:"result"}` 回报 → `bridge_ack` 闭环。
 **对方指定的 reviewer 身份**（如 `alice/agent-9`）就是你本地要派去审核的子代理身份。
+
+### 提案与采纳回路（2.2.0）
+
+审核门解决「产出合不合格」，提案回路解决「**计划本身要不要改**」——子代理在干活时最容易发现原计划缺了什么。
+
+```
+producer 发现阻塞/更好的方案
+        │  swarmbridge: bridge_send {type:"proposal", data:{forTask, problem, items, rationale}}
+        ▼  （跨机器）
+   reviewer / 主代理审阅
+        │  task_review {taskId, verdict:"approve", proposals:[{title, detail?, role?, reviewer?, assignee?, dependsOn?}]}
+        ▼
+   新任务自动进树 → 主代理按 assignee 提示分派
+```
+
+- **生产者怎么提**：遇到阻塞或有更好方案，用 swarmbridge 的 `proposal` 消息发到桥线程
+  （`data = {forTask?, problem?, items?:[{title, …}], rationale?}`，`problem` 与 `items` 至少一个）；
+  单机场景直接写 `task_update` 进展笔记说明建议，由主代理读取后转发或代提。
+- **reviewer 怎么采纳**：判断建议合理后，在 `task_review` 里带上 `proposals` 数组——过审的同时
+  这些计划项**直接加进任务树**（可带 `role` / `reviewer` / `assignee` / `dependsOn`），返回值
+  `adopted:{count, ids}` 告知新增了哪些任务。
+- **主代理怎么派**：按新任务的 `assignee` 提示分派给对应子代理。**`assignee` 只是建议，不强制**——
+  实际谁干仍由 `task_claim` 的 `owner` 决定（这与触发审核门的 `reviewer` 有本质区别）。
+- **驳回时 proposals 不被采纳**：`verdict:"reject"` 会**完全忽略** `proposals`，驳回不会夹带新任务；
+  建议要等下次过审时再提。
+- **采纳是原子的**：任一项不合法（缺 `title`、`role` 非法、依赖不存在等）则**整批不加**，
+  任务树保持原样，错误信息带 `proposals[i]` 下标——改对后重试即可。
 
 ## 子代理互通机制（本插件核心）
 

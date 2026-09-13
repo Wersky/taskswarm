@@ -111,6 +111,16 @@ producer 置 done ──▶ 改道 pending_review ──▶ 下游被阻断
 
 配合 swarmbridge 的 `plan` 消息可做**跨机器 PPR**：对方发计划（含 role/reviewer 分工）→ 本地建任务树继承审核者 → 本地跑审核门 → 结果回报。
 
+### 提案与采纳回路（2.2.0）
+
+审核门管「产出合不合格」，提案回路管「**计划要不要改**」——子代理干活时最清楚原计划缺了什么。
+
+- **提**：producer 遇到阻塞或有更好方案，用 swarmbridge 的 `proposal` 消息发到桥线程（`data = {forTask?, problem?, items?, rationale?}`）；单机场景可直接写 `task_update` 笔记，由主代理转发。
+- **采**：reviewer 认为建议合理，就在 `task_review` 里带上 `proposals`——**过审的同时新计划项自动进树**（可带 `role`/`reviewer`/`assignee`/`dependsOn`），返回 `adopted:{count, ids}`。
+- **派**：主代理按新任务的 `assignee` 提示分派。`assignee` 只是建议执行者，**不影响 `task_claim` 的领取权限**（与触发审核门的 `reviewer` 本质不同）。
+- **驳回不采纳**：`reject` 会**完全忽略** `proposals`，驳回不得夹带新任务。
+- **采纳是原子的**：任一项不合法（缺 `title`、`role` 非法、依赖不存在）则整批不加，任务树保持原样。
+
 ## MCP 工具
 
 | 工具 | 调用方 | 作用 |

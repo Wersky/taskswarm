@@ -7,6 +7,35 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-13
+
+### Added
+
+- **`task_review` 支持 `proposals` 参数（采纳提案回路）**：reviewer 在裁决时可携带一组
+  新计划项（每项 `{id?,title,detail?,dependsOn?,role?,reviewer?,assignee?,parentId?}`，
+  `title` 必填），**审核通过时它们被直接加进任务树**，形成「执行中发现阻塞 → 提建议 →
+  审核通过 → 自动纳入计划」的闭环。返回值新增 `adopted: {count, ids}`（未采纳时为
+  `{count:0, ids:[]}`，调用方无需判空），日志追加「采纳提案」事件（排在「审核通过」之后，
+  看板可读出「先过审、后纳入计划」的因果）。
+- **`assignee` 字段（建议执行者）**：`plan_create` / `task_add` / `proposals` 均可指定
+  `assignee`（身份字符串，如 `"wersky/agent-3"`），在任务视图里显示为 `→ 建议: <身份>`。
+  与 `owner`（实际领取者）区分开：它只表示「建议由谁执行」，是提示而非机制。
+
+### 语义（三条硬规则）
+
+- **仅 `verdict === 'approve'` 时才采纳 proposals**；`reject` 分支根本不读取 `proposals`
+  ——驳回**完全忽略**提案，杜绝「驳回却夹带新任务」。
+- **采纳是原子的**：类型、`role`/`reviewer`/`assignee`、依赖存在性等校验全部发生在真正建
+  节点之前，**任一项不合法则整批不加**，任务树保持原样（错误信息带 `proposals[i]` 下标与
+  改法）。
+- **`assignee` 只是建议，不影响 `task_claim` 的领取权限**：谁实际执行仍由 `task_claim` 的
+  `owner` 决定。与 `reviewer` 有本质区别——`reviewer` 触发审核门（机制），`assignee` 只是标签。
+
+### 兼容性
+
+- 不传 `proposals` 时行为与 2.1.0 完全一致；`assignee` 可选，缺省为 `null`。
+- 旧状态文件可直接读（缺 `assignee` 字段按「无建议执行者」处理）。
+
 ## [2.1.0] - 2026-09-13
 
 ### Added
