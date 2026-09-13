@@ -1,7 +1,7 @@
 {
   "name": "taskswarm",
-  "version": "2.0.0",
-  "description": "任务蜂群（TaskSwarm）：ZCode 插件 —— 多级任务拆解、波次并行派发子代理、共享 MCP 看板进度互通。零依赖，仅需 Node.js >= 18。",
+  "version": "2.1.0",
+  "description": "TaskSwarm: recursive task decomposition, wave-based parallel subagent dispatch, and a shared MCP progress board. Zero dependencies, Node >= 18. Includes a PPR review gate: a task with a reviewer stays blocked (downstream cannot start) until the reviewer approves.",
   "type": "module",
   "license": "MIT",
   "author": {

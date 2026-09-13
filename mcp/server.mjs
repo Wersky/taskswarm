@@ -28,7 +28,7 @@ import readline from 'node:readline';
  * serverInfo.version —— 必须与 package.json / .zcode-plugin/plugin.json 一致（当前 2.0.0）。
  * 有意写成常量而非读 package.json：保持零依赖与零启动 I/O（升级时三处一起改）。
  */
-const SERVER_VERSION = '2.0.0';
+const SERVER_VERSION = '2.1.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
 
 // ---------------------------------------------------------------------------
 // 落盘位置：<工作区>/任务蜂群/（由调用方传 workspace，默认 cwd）
@@ -297,19 +297,37 @@ function mutateState(args, fn) {
 /** 读路径统一入口（plan_get / task_ready / board / state load） */
 function loadState(args) { return readStateStrict(args); }
 
-const TASK_STATUSES = ['pending', 'claimed', 'in_progress', 'blocked', 'done', 'failed', 'skipped'];
+const TASK_STATUSES = ['pending', 'claimed', 'in_progress', 'blocked', 'pending_review', 'done', 'failed', 'skipped'];
 const DONE_LIKE = new Set(['done', 'failed', 'skipped']);
 const TERMINAL = new Set(['done', 'failed', 'skipped']);
 
 /**
+ * PPR 角色（可选）：planner 出计划 / producer 干活 / reviewer 审核。
+ * 角色是**声明式标签**，不参与权限校验（MCP 层无法验身份，真正的边界是仓库写权限
+ * 或本地调用方自觉）；它的作用是让编排可读、并驱动 reviewer 的审核门。
+ */
+const TASK_ROLES = ['planner', 'producer', 'reviewer', 'none'];
+
+/**
+ * 审核门状态（仅当任务指定了 reviewer 时才有意义）：
+ *   none       —— 未指定 reviewer，走旧行为（producer 置 done 即完成）
+ *   pending    —— producer 已置 done，等待 reviewer 裁决（**下游被阻断**）
+ *   approved   —— reviewer 通过（等价于 done，可放行下游）
+ *   rejected   —— reviewer 驳回（回到 in_progress 重做，下游仍阻断）
+ */
+const REVIEW_STAGES = ['none', 'pending', 'approved', 'rejected'];
+
+/**
  * 合法状态转移表（source → 允许到达的目标状态）。
  * 未列出的转移一律拒绝，错误信息里会给出「下一步做什么」。
+ * pending_review 是 PPR 审核门：producer 交活后停在这，等 reviewer 裁决。
  */
 const ALLOWED_TRANSITIONS = {
-  pending: ['claimed', 'in_progress', 'blocked', 'done', 'failed', 'skipped'],
-  claimed: ['in_progress', 'blocked', 'pending', 'done', 'failed', 'skipped'],
-  in_progress: ['blocked', 'pending', 'done', 'failed', 'skipped'],
-  blocked: ['in_progress', 'pending', 'done', 'failed', 'skipped'],
+  pending: ['claimed', 'in_progress', 'blocked', 'pending_review', 'done', 'failed', 'skipped'],
+  claimed: ['in_progress', 'blocked', 'pending', 'pending_review', 'done', 'failed', 'skipped'],
+  in_progress: ['blocked', 'pending', 'pending_review', 'done', 'failed', 'skipped'],
+  blocked: ['in_progress', 'pending', 'pending_review', 'done', 'failed', 'skipped'],
+  pending_review: ['in_progress', 'pending', 'done', 'failed', 'skipped'], // 裁决：通过→done，驳回→in_progress
   done: ['pending'],
   failed: ['pending'],
   skipped: ['pending'],
@@ -382,6 +400,28 @@ function assertValidId(id, where) {
 }
 
 /** 校验 dependsOn 入参类型；返回去重后的 id 数组（元素合法性由调用方结合存在性一起报错） */
+/** PPR 角色归一化：未指定 → 'none'；非法值 → 明确报错（不静默忽略） */
+function normalizeRole(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return 'none';
+  const r = String(value).trim().toLowerCase();
+  if (!TASK_ROLES.includes(r)) {
+    throw new Error(`role 非法（收到 "${value}"）。下一步：用 ${TASK_ROLES.filter(x => x !== 'none').join(' / ')} 之一，或省略该字段。`);
+  }
+  return r;
+}
+
+/**
+ * reviewer 归一化：可以是身份字符串（如 "wersky/agent-3"），也可以省略。
+ * 省略 → null（该任务无审核门，producer 置 done 即完成，保持向后兼容）。
+ */
+function normalizeReviewer(value) {
+  if (value === undefined || value === null) return null;
+  const s = String(value).trim();
+  if (s === '') return null;
+  if (s.length > 80) throw new Error(`reviewer 身份过长（${s.length} > 80）。下一步：用简短身份，如 "wersky/agent-3"。`);
+  return s;
+}
+
 function normalizeDeps(args, where) {
   const raw = args?.dependsOn;
   if (raw === undefined || raw === null) return [];
@@ -612,6 +652,12 @@ function planCreate(args) {
       children: [],
       status: 'pending',
       owner: null,
+      // PPR：role 标识分工；reviewer 指定由谁审核（为空则走旧行为，无审核门）。
+      // reviewStage 初始为 none —— 只有 producer 交活（置 done）且指定了 reviewer 时
+      // 才进入 pending（见 taskUpdate 里的审核门逻辑）。
+      role: normalizeRole(t.role),
+      reviewer: normalizeReviewer(t.reviewer),
+      reviewStage: 'none',
       notes: [],
       createdAt: new Date().toISOString(),
     };
@@ -675,7 +721,15 @@ function planView(state) {
     const deps = depsOf(t).length > 0 ? ` ← 依赖: ${depsOf(t).join(', ')}` : '';
     const blocked = blockingDeps(state, t);
     const block = blocked.length > 0 ? ` ⛔ 上游失败/跳过: ${blocked.join(', ')}` : '';
-    lines.push(`${indent}[${t.id}] (${t.status}) ${t.title}${deps}${block}`);
+    // PPR：显示角色与审核状态，让编排方一眼看到"卡在谁那里"
+    const role = t.role && t.role !== 'none' ? ` {${t.role}}` : '';
+    const review = t.reviewer
+      ? (t.reviewStage === 'pending' ? ` ⏳ 待 ${t.reviewer} 审核`
+        : t.reviewStage === 'approved' ? ` ✔ ${t.reviewer} 已审`
+          : t.reviewStage === 'rejected' ? ` ✖ ${t.reviewer} 已驳回（待重做）`
+            : ` 审核:${t.reviewer}`)
+      : '';
+    lines.push(`${indent}[${t.id}] (${t.status}) ${t.title}${role}${deps}${review}${block}`);
   }
   return lines.join('\n');
 }
@@ -787,43 +841,66 @@ function taskUpdate(args) {
       const from = t.status;
       if (s !== from) {
         const prevOwner = t.owner;            // 回退到 pending 会清空 owner，日志需要旧值
+        // ---- PPR 审核门（在算合法转移之前先改道）----
+        // 任务指定了 reviewer 时，producer 置 done 不等于完成：改道为 pending_review，
+        // 等 reviewer 用 task_review 裁决。这样 depsSatisfied 不会把它当作已完成 →
+        // 下游自动被挡住，「未过审不得推进」由机制保证，而不是靠编排方自觉。
+        const effective = (s === 'done' && t.reviewer && t.reviewStage !== 'approved') ? 'pending_review' : s;
         const allowed = ALLOWED_TRANSITIONS[from] ?? [];
         // 归属校验：未派发（owner 为空）的任务谁都可推进，便于主代理编排；一旦有 owner，就必须是本人
         // （不提供 owner 视为「无法证明是本人」，不能借省略参数绕过校验——恢复场景走 force）
         const ownerKnown = t.owner !== null && t.owner !== undefined;
         const isOwner = ownerKnown && actor !== '' && t.owner === actor;
         const ownerOk = !ownerKnown || isOwner;
-        const terminalRollback = TERMINAL.has(from) && !TERMINAL.has(s);
+        const terminalRollback = TERMINAL.has(from) && !TERMINAL.has(effective);
 
         if (!force) {
           if (!ownerOk) {
             throw new Error(`task_update: 任务 ${taskId} 当前 owner 是 ${t.owner}，你以 ${actor || '(未提供 owner)'} 身份无权改状态。下一步：由 owner 本人汇报，或主代理用 task_update(force:true) 接管（会记 log）。`);
           }
-          if (TERMINAL.has(from) && !TERMINAL.has(s) && !isOwner) {
+          if (TERMINAL.has(from) && !TERMINAL.has(effective) && !isOwner) {
             throw new Error(`task_update: 任务 ${taskId} 已处于终态 ${from}，只有 owner 能回退（当前 owner：${t.owner ?? '(无)'}，你：${actor || '(未提供 owner)'}）。下一步：由当前 owner 回退，或主代理用 task_update(force:true) 强制回退（会记 log）。`);
           }
-          if (!allowed.includes(s)) {
-            throw new Error(`task_update: 不允许的状态转移 ${from} → ${s}（任务 ${taskId}）。合法后继: ${allowed.join('/') || '(无，终态)'}。下一步：改用合法状态；会话中断恢复等特殊场景由主代理用 force:true。`);
+          if (!allowed.includes(effective)) {
+            throw new Error(`task_update: 不允许的状态转移 ${from} → ${effective}（任务 ${taskId}）。合法后继: ${allowed.join('/') || '(无，终态)'}。下一步：改用合法状态；会话中断恢复等特殊场景由主代理用 force:true。`);
           }
         } else if (actor === '') {
           throw new Error(`task_update: force 必须由主代理显式操作，需同时提供 owner。下一步：写成 {"taskId":"${taskId}","status":"${s}","owner":"main","force":true}。`);
         }
 
-        t.status = s;
+        t.status = effective;
         mutated = true;
-        if (s === 'in_progress' && !t.startedAt) t.startedAt = new Date().toISOString();
-        if (s === 'pending') { // 回退到 pending：清掉领取痕迹，允许重新派发
+        if (effective === 'in_progress' && !t.startedAt) t.startedAt = new Date().toISOString();
+        if (effective === 'pending') { // 回退到 pending：清掉领取痕迹，允许重新派发
           t.owner = null;
           t.claimedAt = null;
           t.startedAt = null;
           t.finishedAt = null;
           released = true;
         }
-        if (DONE_LIKE.has(s)) {
+
+        if (effective === 'pending_review') {
+          // 进入待审核：记录交活时间，reviewStage 转 pending（下游仍被阻断）
+          t.reviewStage = 'pending';
+          t.submittedAt = new Date().toISOString();
+          state.log.push({
+            at: t.submittedAt, event: '待审核', taskId, owner: t.owner,
+            detail: `producer 已交活，等待 reviewer=${t.reviewer} 裁决（下游保持阻断直到通过）`,
+          });
+        }
+        if (DONE_LIKE.has(effective)) {
           t.finishedAt = new Date().toISOString();
+          // 走完审核门的才算真完成
+          if (effective === 'done' && t.reviewer) t.reviewStage = 'approved';
           // 失败/跳过的任务，其对下游的影响由 failurePolicy 决定：block（默认）永久挡住下游，
           // proceed 则照常放行（task_ready 会用 blockedBy 标注是哪个上游出了问题）。此处仅记录。
-          state.log.push({ at: t.finishedAt, event: s === 'failed' ? '失败' : s === 'skipped' ? '跳过' : '完成', taskId, owner: prevOwner ?? t.owner });
+          state.log.push({ at: t.finishedAt, event: effective === 'failed' ? '失败' : effective === 'skipped' ? '跳过' : '完成', taskId, owner: prevOwner ?? t.owner });
+        }
+        if (s !== effective) {
+          state.log.push({
+            at: new Date().toISOString(), event: '审核门拦截', taskId, owner: actor,
+            detail: `请求 done 但该任务指定了 reviewer=${t.reviewer}，改道 pending_review`,
+          });
         }
         if (force) {
           state.log.push({
@@ -904,6 +981,9 @@ function taskAdd(args) {
       children: [],
       status: 'pending',
       owner: null,
+      role: normalizeRole(args?.role),
+      reviewer: normalizeReviewer(args?.reviewer),
+      reviewStage: 'none',
       notes: [],
       createdAt: new Date().toISOString(),
     };
@@ -995,6 +1075,83 @@ function taskNotes(args) {
   };
 }
 
+/**
+ * task_review —— PPR 审核门的裁决入口（reviewer 专用）。
+ *
+ * 语义：
+ *   approve → 任务转 done、reviewStage=approved、下游随之放行；
+ *   reject  → 任务回到 in_progress（打回重做）、reviewStage=rejected、下游继续阻断，
+ *             驳回理由必填并写入笔记，便于 producer 知道要改什么。
+ *
+ * 权限：只允许任务上登记的 reviewer 本人裁决（force:true 供主代理兜底）。
+ * 未登记 reviewer 的任务不允许走本工具（它们没有审核门，直接 task_update 置 done 即可）。
+ */
+function taskReview(args) {
+  return mutateState(args, (raw) => {
+    const state = ensureState(raw);
+    if (args?.taskId === undefined || args?.taskId === null) {
+      throw new Error('task_review: 缺少 taskId。下一步：传入要裁决的任务 id，例如 {"taskId":"T1","verdict":"approve","owner":"wersky/agent-3"}。');
+    }
+    const taskId = requireString(args.taskId, 'task_review: taskId').trim();
+    const t = findTask(state, taskId);
+    const actor = args?.owner === undefined || args?.owner === null ? '' : requireString(args.owner, 'task_review: owner').trim();
+    const verdict = requireString(args?.verdict, 'task_review: verdict').trim().toLowerCase();
+    const force = args?.force === true;
+
+    if (!['approve', 'reject'].includes(verdict)) {
+      throw new Error(`task_review: verdict 必须是 approve 或 reject（收到 "${args?.verdict}"）。下一步：approve=通过，reject=打回重做。`);
+    }
+    if (!t.reviewer) {
+      throw new Error(`task_review: 任务 ${taskId} 没有指定 reviewer，不存在审核门。下一步：任务直接由 owner 用 task_update 置 done 即可；若确需审核，请重建该任务并在 plan_create/task_add 时指定 reviewer 字段。`);
+    }
+    if (!force && actor === '') {
+      throw new Error(`task_review: 缺少 owner。下一步：传入裁决者身份，必须与任务上登记的 reviewer（${t.reviewer}）一致。`);
+    }
+    if (!force && actor !== t.reviewer) {
+      throw new Error(`task_review: 任务 ${taskId} 登记的 reviewer 是 ${t.reviewer}，你以 ${actor || '(未提供 owner)'} 身份无权裁决。下一步：由 ${t.reviewer} 裁决，或主代理用 force:true 代裁（会记 log）。`);
+    }
+    if (t.status !== 'pending_review') {
+      throw new Error(`task_review: 任务 ${taskId} 当前状态是 ${t.status}，不在待审核（pending_review）。下一步：${t.status === 'in_progress' || t.status === 'pending' || t.status === 'claimed' ? '等 producer 交活（置 done）后系统会自动转入待审核' : '用 plan_get / board 查看当前状态'}。`);
+    }
+
+    const now = new Date().toISOString();
+    if (verdict === 'approve') {
+      t.status = 'done';
+      t.reviewStage = 'approved';
+      t.finishedAt = now;
+      t.reviewedAt = now;
+      t.reviewedBy = actor || t.reviewer;
+      state.log.push({ at: now, event: '审核通过', taskId, owner: actor || t.reviewer, detail: `下游随之放行（reviewer=${t.reviewer}）` });
+    } else {
+      const reason = String(args?.reason ?? '').trim();
+      if (reason === '') {
+        throw new Error(`task_review: reject 必须给 reason（写明要改什么）。下一步：{"taskId":"${taskId}","verdict":"reject","reason":"具体问题","owner":"${t.reviewer}"}。`);
+      }
+      t.status = 'in_progress';
+      t.reviewStage = 'rejected';
+      t.reviewedAt = now;
+      t.reviewedBy = actor || t.reviewer;
+      t.finishedAt = null;
+      t.notes.push({ at: now, owner: actor || t.reviewer, note: `【审核驳回】${reason}` });
+      state.log.push({ at: now, event: '审核驳回', taskId, owner: actor || t.reviewer, detail: `打回重做，下游保持阻断：${reason.slice(0, 120)}` });
+    }
+    if (force && actor !== t.reviewer) {
+      state.log.push({ at: now, event: '强制裁决', taskId, owner: actor, detail: `原 reviewer=${t.reviewer}，verdict=${verdict}` });
+    }
+
+    return {
+      __save: state,
+      __result: {
+        ok: true,
+        task: { id: t.id, status: t.status, reviewStage: t.reviewStage, reviewer: t.reviewer, reviewedBy: actor || t.reviewer },
+        hint: verdict === 'approve'
+          ? '已通过，下游依赖该任务的任务现在可以派发。'
+          : '已打回，任务回到 in_progress；producer 看到驳回理由后重做，再次交活会重新进入待审核。',
+      },
+    };
+  });
+}
+
 function board(args) {
   const state = loadState(args);
   if (!state) return { active: false };
@@ -1057,12 +1214,12 @@ function stateTool(args) {
 // ---------------------------------------------------------------------------
 const TOOLS = [
   {
-    name: 'plan_create', description: '创建蜂群任务：一次多级任务拆解（任务树，含依赖）。goal=总目标；tasks=[{id?,title,detail?,dependsOn?,subtasks:[...]}]（subtasks 最多 5 层）。failurePolicy 默认 "block"（上游 failed/skipped 时挡住下游）；"proceed" 则照常放行并在 task_ready 里标注 blockedBy。',
+    name: 'plan_create', description: '创建蜂群任务：一次多级任务拆解（任务树，含依赖）。goal=总目标；tasks=[{id?,title,detail?,dependsOn?,role?,reviewer?,subtasks:[...]}]（subtasks 最多 5 层）。PPR：给任务配 reviewer 即启用审核门——producer 置 done 会转入 pending_review，必须由 reviewer 用 task_review 通过后下游才放行。failurePolicy 默认 "block"（上游 failed/skipped 时挡住下游）；"proceed" 则照常放行并在 task_ready 里标注 blockedBy。',
     inputSchema: {
       type: 'object', required: ['goal', 'tasks'],
       properties: {
         goal: { type: 'string', description: '总目标' },
-        tasks: { type: 'array', items: { type: 'object' }, description: '顶级任务数组，每项 {id?,title,detail?,dependsOn?,subtasks:[{id?,title,detail?,dependsOn?,subtasks:[...]}]}，嵌套最多 5 层' },
+        tasks: { type: 'array', items: { type: 'object' }, description: '顶级任务数组，每项 {id?,title,detail?,dependsOn?,role?,reviewer?,subtasks:[{id?,title,detail?,dependsOn?,role?,reviewer?}]}，嵌套最多 5 层。role 取值 planner/producer/reviewer（声明式标签）；reviewer 填身份字符串（如 "wersky/agent-3"）即为该任务启用审核门' },
         failurePolicy: { type: 'string', enum: ['block', 'proceed'], description: '上游 failed/skipped 时下游的处理策略：block（默认）挡住，proceed 放行并标注 blockedBy' },
       },
     },
@@ -1097,10 +1254,17 @@ const TOOLS = [
     },
   },
   {
-    name: 'task_add', description: '执行中途追加任务（支持多级拆解持续发生）。{title,detail?,dependsOn?,parentId?}。',
+    name: 'task_add', description: '执行中途追加任务（支持多级拆解持续发生）。{title,detail?,dependsOn?,parentId?,role?,reviewer?}。配 reviewer 即启用 PPR 审核门。',
     inputSchema: {
       type: 'object', required: ['title'],
-      properties: { title: { type: 'string' }, detail: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } }, parentId: { type: 'string' } },
+      properties: {
+        title: { type: 'string' },
+        detail: { type: 'string' },
+        dependsOn: { type: 'array', items: { type: 'string' } },
+        parentId: { type: 'string' },
+        role: { type: 'string', enum: ['planner', 'producer', 'reviewer'], description: 'PPR 角色标签（声明式，可选）' },
+        reviewer: { type: 'string', description: '指定审核者身份（如 "wersky/agent-3"）；填了即启用审核门' },
+      },
     },
   },
   {
@@ -1111,6 +1275,19 @@ const TOOLS = [
         taskId: { type: 'string', description: '任务 id（可用 plan_get / board 查看）' },
         limit: { type: 'number', description: `每页条数，默认 ${NOTES_LIMIT_DEFAULT}，取值 1..${NOTES_LIMIT_MAX}` },
         offset: { type: 'number', description: '从最新一条往回跳过的条数，默认 0（0 = 最新一条）；超过总数时返回空页' },
+      },
+    },
+  },
+  {
+    name: 'task_review', description: 'PPR 审核门裁决（reviewer 专用）：对处于「待审核」的任务给出通过（approve）或打回（reject）。approve → 任务转 done、下游放行；reject → 任务回到 in_progress 重做、下游继续阻断（reason 必填）。仅任务上登记的 reviewer 本人可裁决（主代理可用 force:true 代裁）。',
+    inputSchema: {
+      type: 'object', required: ['taskId', 'verdict'],
+      properties: {
+        taskId: { type: 'string', description: '要裁决的任务 id' },
+        verdict: { type: 'string', description: 'approve（通过）或 reject（打回重做）' },
+        reason: { type: 'string', description: 'reject 时必填：写明要改什么（会写入任务笔记，producer 据此重做）' },
+        owner: { type: 'string', description: '裁决者身份，必须与任务登记的 reviewer 一致' },
+        force: { type: 'boolean', description: '主代理代裁用（跳过 reviewer 身份校验，会记 log）' },
       },
     },
   },
@@ -1133,6 +1310,7 @@ const HANDLERS = {
   task_update: taskUpdate,
   task_add: taskAdd,
   task_notes: taskNotes,
+  task_review: taskReview,
   board: board,
   state: stateTool,
 };

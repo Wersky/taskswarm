@@ -32,13 +32,13 @@ describe('协议层', () => {
       'server.mjs 里的版本号必须与 plugin.json 一致，否则升级时会漏改');
   });
 
-  test('tools/list 返回 10 个工具，且都带 inputSchema', async () => {
+  test('tools/list 返回 11 个工具，且都带 inputSchema', async () => {
     const res = await c.rpc('tools/list', {});
     const names = res.result.tools.map(t => t.name).sort();
-    assert.equal(res.result.tools.length, 10);
+    assert.equal(res.result.tools.length, 11);
     assert.deepEqual(names, [
       'board', 'plan_create', 'plan_get', 'plan_reset', 'state',
-      'task_add', 'task_claim', 'task_notes', 'task_ready', 'task_update',
+      'task_add', 'task_claim', 'task_notes', 'task_ready', 'task_review', 'task_update',
     ]);
     for (const t of res.result.tools) {
       assert.equal(t.inputSchema.type, 'object', `${t.name} 缺少 inputSchema`);

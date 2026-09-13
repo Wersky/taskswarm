@@ -28,10 +28,40 @@ description: 任务蜂群（多级任务拆解 + 并行子代理编排）。当�
 | `task_update` | 子代理/主代理 | 汇报状态 + 进展笔记；主代理恢复死任务用 `force:true` |
 | `task_notes` | 所有人 | **读回某任务笔记全文**（分页，`limit ≤ 200`）——`plan_get`/`board` 只给摘要 |
 | `task_add` | 主代理/子代理 | 执行中途追加任务（多级拆解持续发生） |
+| `task_review` | reviewer | **PPR 审核裁决**：`approve` 通过（下游放行）/ `reject` 打回（须给 reason，任务回 in_progress） |
 | `board` | 所有人 | **共享进度看板**：状态、负责人、最新笔记摘要 |
 | `plan_reset` / `state` | 主代理 | 重开 / 状态落盘与恢复 |
 
 **所有调用必须显式传 `workspace` 参数**（当前工作区绝对路径）。省略时状态会落在 server 进程的 cwd，可能不是你以为的地方。
+
+## PPR 审核门（质量关卡）
+
+给任务配 `reviewer` 就启用了审核门——**这是机制，不是约定**：
+
+```
+producer 置 done ──▶ 审核门改道 pending_review ──▶ 下游被阻断
+                                                    │
+                        reviewer task_review ───────┴──▶ approve: 转 done，下游放行
+                                                         reject : 回 in_progress，下游继续阻断
+```
+
+**关键点**：
+
+- **未过审 = 下游不可派发**。`pending_review` 不在"已完成"集合里，所以 `task_ready` 不会放出下游、`task_claim` 也领不走——你不需要额外做什么，机制自动生效；
+- **驳回必带理由**，理由会写进任务笔记（`task_notes` 可读），producer 据此重做；重做后再交活会重新进入待审核；
+- **只有登记的 reviewer 能裁决**，别人调 `task_review` 会被拒并提示正确的 reviewer 是谁；主代理可用 `force:true` 代裁（留审计事件）；
+- **支持多级审核链**：A（reviewer=r1）过审 → B 才可开始 → B 过审 → C 放行，逐级生效；
+- **不配 reviewer 就是旧行为**（producer 置 done 即完成），完全向后兼容。
+
+**什么时候该配 reviewer**：产出需要人工或另一代理把关的任务（对外接口、要交付的文档、关键算法）；纯机械步骤（跑测试、格式化）不必配，否则白白拖长流程。
+
+角色字段 `role`（`planner`/`producer`/`reviewer`）是**声明式标签**，只影响可读性（视图显示 `{producer}`），不参与权限校验。
+
+### 跨机器 PPR（与 swarmbridge 配合）
+
+对方用 `bridge_send {type:"plan", data:{plan:[{id,title,role,reviewer,dependsOn}], reviewer}}` 发来计划时：
+把 `data.plan` 逐项转成本地 `plan_create` 的 tasks（`role`/`reviewer` 原样带入）→ 本地跑 PPR → 完成后 `bridge_reply {type:"result"}` 回报 → `bridge_ack` 闭环。
+**对方指定的 reviewer 身份**（如 `alice/agent-9`）就是你本地要派去审核的子代理身份。
 
 ## 子代理互通机制（本插件核心）
 

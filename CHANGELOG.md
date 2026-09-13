@@ -7,6 +7,31 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-13
+
+### Added
+
+- **PPR 审核门**：任务可指定 `reviewer`，producer 置 done 会被自动改道为 `pending_review`——
+  **未过审时下游任务不可派发、不可领取**。这是机制而非约定：`pending_review` 不在"已完成"
+  集合里，因此 `task_ready`/`task_claim` 自动拦住下游，无需编排方额外判断。
+- **`task_review` 工具**：`approve`（转 done、下游放行）/`reject`（回 in_progress、下游继续
+  阻断、理由必填并写入任务笔记）。仅登记的 reviewer 本人可裁决，主代理可 `force:true` 代裁（留审计）。
+- **角色字段 `role`**（planner/producer/reviewer）：声明式标签，在任务视图里显示，便于阅读分工。
+- 支持**多级审核链**：A 过审 → B 可开始 → B 过审 → C 放行，逐级生效。
+- 视图与看板显示审核状态（`⏳ 待 X 审核` / `✔ X 已审` / `✖ X 已驳回`）。
+
+### Changed
+
+- 工具数 10 → 11；`plan_create` / `task_add` 接受 `role` 与 `reviewer`；
+  状态机新增 `pending_review` 状态与相应转移。
+- 非法 `role` 会被明确拒绝（不静默忽略）。
+
+### 兼容性
+
+- **不配 `reviewer` 的任务行为完全不变**（producer 置 done 即完成），向后兼容。
+- 旧状态文件可直接读（缺 `role`/`reviewer`/`reviewStage` 字段按"无审核门"处理）。
+
+
 ## [2.0.0] - 2026-09-12
 
 从「本机能跑的 1.0.0」升级为「可移植、可公开、可展示」的 2.0.0：先修正确性，再补工程化，最后做文档展示。

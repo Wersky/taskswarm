@@ -92,6 +92,25 @@ git clone https://github.com/Wersky/taskswarm.git
 
 并行最常见的翻车方式，是让两个子代理同时改同一个文件——后写的覆盖先写的，而且双方都以为自己成功了。**拆解时凡是要动同一批文件的任务，必须用 `dependsOn` 串起来。**
 
+## PPR 审核门（2.1.0）
+
+给任务配 `reviewer` 即启用审核门——**未过审时下游不可派发**，由机制保证而非约定：
+
+```
+producer 置 done ──▶ 改道 pending_review ──▶ 下游被阻断
+                                              │
+                      reviewer task_review ───┴──▶ approve: 转 done，下游放行
+                                                    reject : 回 in_progress，下游继续阻断
+```
+
+- `pending_review` 不在「已完成」集合里，所以 `task_ready` / `task_claim` 自动拦住下游；
+- 驳回必带理由（写入任务笔记，producer 据此重做）；重做交活会重新进入待审核；
+- 仅登记的 reviewer 本人可裁决，主代理可用 `force:true` 代裁（留审计事件）；
+- 支持多级审核链（A 过审 → B 开始 → B 过审 → C 放行）；
+- **不配 reviewer 行为完全不变**（向后兼容）。
+
+配合 swarmbridge 的 `plan` 消息可做**跨机器 PPR**：对方发计划（含 role/reviewer 分工）→ 本地建任务树继承审核者 → 本地跑审核门 → 结果回报。
+
 ## MCP 工具
 
 | 工具 | 调用方 | 作用 |
