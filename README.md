@@ -2,8 +2,8 @@
 
 > ZCode 插件的多 Agent 编排引擎：把一个目标拆成任务树，按依赖波次并行派发子代理，用共享看板让互不可见的子代理"看见"彼此。
 
-[![tests](https://img.shields.io/badge/tests-91%20passed-brightgreen)](#测试与可靠性)
-[![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2086.8%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2096.4%25-brightgreen)](#测试与可靠性)
+[![tests](https://img.shields.io/badge/tests-123%20passed-brightgreen)](#测试与可靠性)
+[![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2090.3%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2098.0%25-brightgreen)](#测试与可靠性)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#工程要点)
 [![node](https://img.shields.io/badge/node-%3E%3D18-blue)](https://nodejs.org)
 
@@ -132,6 +132,7 @@ producer 置 done ──▶ 改道 pending_review ──▶ 下游被阻断
 | `task_update` | 子代理 / 主代理 | 状态流转 + 进展笔记；主代理恢复死任务用 `force:true` |
 | `task_notes` | 所有人 | **读回笔记全文**（分页，`limit ≤ 200`） |
 | `task_add` | 主代理 / 子代理 | 执行中途追加任务（拆解可持续发生） |
+| `task_review` | **reviewer** | **PPR 审核裁决**：`approve` 放行下游 / `reject` 打回重做；可带 `proposals` 过审时纳入新计划项 |
 | `board` | 所有人 | **共享进度看板**（状态、负责人、最新笔记摘要） |
 | `plan_reset` / `state` | 主代理 | 重开 / 状态落盘与恢复 |
 
@@ -141,11 +142,11 @@ producer 置 done ──▶ 改道 pending_review ──▶ 下游被阻断
 
 ## 测试与可靠性
 
-**91 个测试，全部通过；行覆盖 86.8%，函数覆盖 96.4%。**
+**123 个测试，全部通过；行覆盖 90.3%，函数覆盖 98.0%。**
 
 ```bash
-npm test          # 91 tests, 0 fail
-npm run coverage  # 行覆盖 86.8% (696/802) · 函数覆盖 96.4% (80/83)
+npm test          # 123 tests, 0 fail
+npm run coverage  # 行覆盖 90.3% (895/991) · 函数覆盖 98.0% (99/101)
 ```
 
 要求 Node ≥ 18，无任何测试框架依赖（用内置 `node:test` + `node:assert/strict`）。
@@ -217,7 +218,7 @@ MIT © 2026 Wersky
 
 **Deterministic work lives in the MCP server** (task tree, dependency resolution, atomic claiming, crash-safe persistence, board rendering); **the orchestration loop lives in the main agent** (what to decompose, whom to dispatch, when to collect). Zero third-party dependencies.
 
-**Reliability.** 91 tests (all passing), 86.8% line / 96.4% function coverage. Every test drives a **real spawned MCP server process**, because the guarantees that matter — no data corruption under concurrent multi-process writes, no double-claiming of the same task — only exist across processes. Measured: two processes appending 120 notes each previously corrupted the state file (217 tool errors, unrecoverable plan loss) and 60 concurrent claim attempts double-claimed 4 times; both are now zero, locked by regression tests. Writes are atomic (temp → fsync → rename) behind a cross-process file lock with stale-lock recovery; corrupt files are backed up rather than silently discarded.
+**Reliability.** 123 tests (all passing), 90.3% line / 98.0% function coverage. Every test drives a **real spawned MCP server process**, because the guarantees that matter — no data corruption under concurrent multi-process writes, no double-claiming of the same task — only exist across processes. Measured: two processes appending 120 notes each previously corrupted the state file (217 tool errors, unrecoverable plan loss) and 60 concurrent claim attempts double-claimed 4 times; both are now zero, locked by regression tests. Writes are atomic (temp → fsync → rename) behind a cross-process file lock with stale-lock recovery; corrupt files are backed up rather than silently discarded.
 
 **Portable by design** — plugin manifest uses `${ZCODE_PLUGIN_ROOT}` placeholders, no hardcoded absolute paths.
 
