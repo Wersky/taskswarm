@@ -2,6 +2,8 @@
 
 > 多 Agent 编排引擎：把一个目标拆成任务树，按依赖波次并行派发子代理，用共享看板让互不可见的子代理"看见"彼此。**MCP 服务端零依赖、三平台共用**（ZCode / dsh / Codex CLI）。
 
+[English](README.en.md) | 中文
+
 [![tests](https://img.shields.io/badge/tests-123%20passed-brightgreen)](#测试与可靠性)
 [![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2090.3%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2098.0%25-brightgreen)](#测试与可靠性)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#工程要点)
@@ -25,6 +27,12 @@
 
 **结论**：看板通道在所有宿主可用——这就是跨平台的意义。dsh 另有子代理 ↔ 父代理直连通道，
 能力比 ZCode 版更强（看板从"唯一通道"降级为"公共黑板 + 持久化事实源"）。
+
+> **验证边界（不夸大）**：三个宿主里，**只有 ZCode 是端到端跑过真实蜂群的**（本插件诞生于此，
+> 123 个测试全部跑在该路径上）。dsh 验证到"MCP 链路 + 11 工具 + 依赖守卫"这一层（以
+> `dsh-mcp-client` 相同的方式逐步驱动）；Codex 验证到"MCP 挂载成功"。**两边的"模型驱动完整蜂群"
+> 都还没跑过**——测试当日所有可用中转 key 余额不足。Codex 另有一项版本相关风险：
+> 子代理能否继承父会话的 MCP 工具随版本变化，需自行验证。详见各 `adapters/` 文档的实测记录表。
 
 适配配置与实测记录见 [`adapters/dsh/`](adapters/dsh/README.md) 与 [`adapters/codex/`](adapters/codex/README.md)。
 

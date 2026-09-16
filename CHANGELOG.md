@@ -9,6 +9,11 @@
 
 ### Added
 
+- **英文版 README（`README.en.md`）**：面向英文读者的完整介绍，不是逐字直译而是按英文技术文档
+  习惯重写（13 个章节与中文版一一对应），所有事实、数字与保留项保持一致——包括
+  "`force` 不是安全边界"、"推送有延迟"、"单波 ≤ 4"以及各平台的验证边界声明。
+  两版顶部互相链接。
+
 - **多宿主适配：dsh（DeepSeek Harness）与 Codex CLI**。`mcp/server.mjs` **一行未改**——
   它本来就只依赖标准 MCP stdio 协议，宿主耦合仅在插件清单与技能文档两处。
   新增 `adapters/dsh/`（`cordis.patch.yml` 片段 + 编排说明）与 `adapters/codex/`
