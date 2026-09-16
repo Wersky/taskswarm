@@ -7,6 +7,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- **多宿主适配：dsh（DeepSeek Harness）与 Codex CLI**。`mcp/server.mjs` **一行未改**——
+  它本来就只依赖标准 MCP stdio 协议，宿主耦合仅在插件清单与技能文档两处。
+  新增 `adapters/dsh/`（`cordis.patch.yml` 片段 + 编排说明）与 `adapters/codex/`
+  （`config.toml` 片段 + 版本风险说明）。
+
+  **dsh 的编排通道比 ZCode 更强**：dsh 原生提供 `send_message`（父→子，可续期）、
+  `report`（子→父主动回传）、`list_agents` / `interrupt_agent`（观察与干预），
+  因此 dsh 版在"看板拉取"之上多了**子代理 ↔ 父代理直连**，看板从"唯一通道"降级为
+  "公共黑板 + 持久化事实源"。
+
+  实测（2026-09-16）：dsh 侧以 `@deepseek-ai/dsh-mcp-client` 挂载后，
+  11 个工具全部注册为 `mcp__taskswarm__*`，`initialize` 握手、`plan_create` /
+  `plan_get` 读写、`task_claim` / `task_update` / `board`、依赖守卫、状态落盘均通过；
+  Codex 侧 `codex mcp add` + `codex mcp list` 确认挂载成功。
+  两边的**端到端模型驱动蜂群均未跑**（测试当日所有可用中转 key 余额不足）；
+  Codex 另有一项版本相关风险：子代理能否继承父会话的 MCP 工具随版本变化，需自行验证。
+
+### Changed
+
+- **`SKILL.md` 宿主无关化**：原文写死了 ZCode 的 `Agent` / `SendMessage` 术语并断言
+  "子代理无法互发消息"，现改为按宿主分列的能力矩阵（ZCode / dsh / Codex），
+  派发、收波、失败处理各节均给出三平台的工具映射。dsh 的 `report` 上报义务
+  已写进子代理 prompt 模板。
+- **README 增补「平台适配现状」矩阵**，安装章节拆成三平台；英文摘要同步。
+- **已知限制修正**：原文称"子代理无法互发消息"，实际上看板是**可读也可写**的——
+  `task_update` 的 owner 校验只管状态变更，任何代理都能给任意任务卡追加笔记，
+  这是子代理之间的双向通道。文档已按实测结论更正。
+
 ### Fixed
 
 - **`scripts/check-docs.mjs` 在独立克隆副本中崩溃**：该脚本硬依赖上级目录的

@@ -92,10 +92,49 @@ producer 发现阻塞/更好的方案
 
 ## 子代理互通机制（本插件核心）
 
-子代理**没有** `SendMessage`、**没有** `Agent` 工具（实测确认）。互相通信全靠两条通道：
+> **宿主差异先说清**：本插件的 MCP 服务端三平台共用，但"派发子代理"与"子代理能否互相通信"
+> **由宿主决定**。先看这张表，再按你所在宿主的行去读对应小节。
+>
+> | | ZCode | dsh（DeepSeek Harness） | Codex CLI |
+> | --- | --- | --- | --- |
+> | 派发子代理 | `Agent`（general-purpose，`run_in_background:true`） | `subagent`（provider 为 `spawn`/`fork`） | `.codex/agents/*.toml` 角色 + `multi_agent` |
+> | 父→子推送 | `SendMessage(to: agentId)`，只能送达运行中的 | **`send_message`**（成为子代理下一轮，可续期） | 无 |
+> | 子→父回报 | 无（只能等最终回复） | **`report`**（主动回传，不必等收尾） | 无 |
+> | 观察/干预 | 无 | **`list_agents`** / **`interrupt_agent`** | 无 |
+> | 子代理互通 | 靠共享看板（无直连） | 看板 + 父代理直连通道 | 靠共享看板（无直连） |
+>
+> 结论：**看板通道在所有宿主都可用**（这就是本插件跨平台的价值）；
+> dsh 另有直连通道，把看板从"唯一通道"降级为"公共黑板 + 持久化事实源"。
 
-1. **看板拉取（默认通道）**：子代理 prompt 中**强制要求**——开工前 `task_claim` 领任务、每完成一个里程碑 `task_update` 写进展笔记、需要了解别人进度时调 `board`。进展笔记要写「做了什么 + 对其他任务有什么影响」（如「接口 schema 已定稿在 src/api/types.ts，前端任务可直接引用」）。重要结论要让同伴能用 `task_notes` 读到全文。
-2. **主代理转发（推送通道）**：主代理在派发新任务时，把**已完成的相邻任务的产出摘要**写进新子代理的 prompt；发现某后台子代理的工作与另一子代理的产出相关时，用 `SendMessage`（to: agentId）把对方的关键进展推给它。实测主代理的 `SendMessage` 能送达**运行中**的后台子代理（长任务中途也能收到）。
+### 通道一：看板拉取（所有宿主可用，默认通道）
+
+子代理 prompt 中**强制要求**：开工前 `task_claim` 领任务、每完成一个里程碑 `task_update`
+写进展笔记、需要了解别人进度时调 `board`。进展笔记要写「做了什么 + 对其他任务有什么影响」
+（如「接口 schema 已定稿在 src/api/types.ts，前端任务可直接引用」）。
+重要结论要让同伴能用 `task_notes` 读到全文。
+
+**看板可读也可写**：`task_update` 的 owner 校验只管**状态变更**，不管写笔记——
+任何代理都能给**任意**任务卡追加笔记（跨代理留言）。这是子代理之间真正的双向通道：
+把结论写进同伴的任务卡，也去自己的任务卡上读同伴留给你的话。
+
+### 通道二：主代理推送（ZCode）
+
+主代理在派发新任务时，把**已完成相邻任务的产出摘要**写进新子代理的 prompt；
+发现某后台子代理的工作与另一子代理的产出相关时，用 `SendMessage`（to: agentId）
+把对方的关键进展推给它。实测能送达**运行中**的后台子代理（长任务中途也能收到）。
+
+### 通道三：父代理直连（dsh 专属，能力最强）
+
+dsh 原生提供子代理 ↔ 父代理双向通道，**优先用它们而不是模仿 ZCode 的两通道**：
+
+- **`report`（子→父）**：子代理遇到阻塞、发现更好方案、或关键产出落盘时**立刻上报**，
+  不必等任务收尾。这是 ZCode 版做不到的——那边只能等子代理结束。
+- **`send_message`（父→子）**：中途追加工作或纠偏。注意它是 **FIFO 的下一轮**，
+  **不会打断正在跑的那一轮**；要立即停用 `interrupt_agent`（只停当前轮、保留队列）。
+- **`list_agents`**：查看在跑的子代理（`children` / `descendants` 两种范围）与状态。
+
+派发模板与完整说明见 [`adapters/dsh/README.md`](../../adapters/dsh/README.md)。
+
 
 ## 流程
 
@@ -115,29 +154,37 @@ producer 发现阻塞/更好的方案
 
 每波循环做：
 1. `task_ready` 拿就绪任务列表；
-2. 为每个就绪任务启动一个 `Agent`（general-purpose，**`run_in_background: true`**），prompt 必须包含：
+2. 为每个就绪任务启动一个**后台子代理**——按宿主选工具：
+   - **ZCode**：`Agent`（general-purpose，**`run_in_background: true`**）
+   - **dsh**：`subagent`（`run_in_background: true`，provider 用 `spawn` 或 `fork`）
+   - **Codex**：用 `.codex/agents/` 里定义的角色，或用 `multi_agent` 并行的代理
+
+   prompt 必须包含：
    - **身份**：「你是蜂群成员 `<owner>`（如 agent-1），负责任务 `[T3] 标题`」；
    - **开工三步**：先 `task_claim`（taskId + owner + workspace）领取 → 过程中每完成一个节点 `task_update` 写状态和进展笔记 → 收尾时置 done/failed 并写最终笔记（产出物路径/结论）；
    - **互通义务**：「开工前和需要别人产出时，调 `board` 查看全队进度；你的进展笔记会影响其他代理的决策，务必具体；重要结论写明产出物路径，同伴会用 `task_notes` 读全文」；
+   - **上报义务（dsh 专属）**：「遇到阻塞、发现更好方案、或关键产出落盘时，**立刻调 `report` 上报**，不要攒到收尾」——dsh 之外的宿主没有这个通道，子代理只能靠最终回复与看板笔记；
    - **上下文注入**：总目标一句话 + 本任务 detail + 已完成的依赖任务的产出摘要（用 `task_notes` 取全文，别只用摘要）+ 工作区路径约束（下载/缓存走 D 盘等用户规则适用的要带上）；
    - **隔离要求**：若任务涉及自测，要求它用独立临时目录，**不要污染真实工作区**；
    - **完成信号**：「全部做完后，最终回复只需一段简短总结（≤200 字）：做了什么、产出在哪、对其他任务的影响」。
 3. 全部派出后告知用户：本波派了哪几个任务给谁。
 
 **并行度控制**：同一波后台子代理 ≤ 4 个（多了上下文切换与 token 开销反噬提效）。
+dsh 的 `maxDepth` 默认 3，蜂群嵌套不要超过两层。
 
 **并发安全**：插件的写盘有跨进程文件锁保护（同一工作区多进程并发写不会损坏状态），但**业务层面的冲突仍需你用 `dependsOn` 避免**——锁只保证数据不坏，不保证两个子代理不会做重复工作。
 
 ### 3. 收波与转发
 
-- 后台子代理完成会通知主代理（TaskOutput / 完成通知）。收到后：核对看板上该任务状态已是 done、用 `task_notes` 提取该任务的关键结论（不只是摘要）；
-- 若其他在跑子代理的任务依赖这个产出，立刻 `SendMessage` 推送给对应 agentId（一两句话 + 产出物路径）；
+- 后台子代理完成会通知主代理（ZCode 的 TaskOutput / dsh 的结算通知 / Codex 的 job 结果）。收到后：核对看板上该任务状态已是 done、用 `task_notes` 提取该任务的关键结论（不只是摘要）；
+- 若其他在跑子代理的任务依赖这个产出，立刻**推送给它**（一两句话 + 产出物路径）：
+  **ZCode** 用 `SendMessage(to: agentId)`；**dsh** 用 `send_message(subagent_id, message)`——更可靠，且支持给已 `idle` 的子代理续期新工作；
 - 全波收齐 → 回到第 2 步派下一波。
 
 **子代理失败处理**：状态为 failed 时看笔记判断——
-- 可修复的（环境问题、路径错）：`SendMessage` 带着错误信息让它重试；
+- 可修复的（环境问题、路径错）：带错误信息让它重试（ZCode 用 `SendMessage`；dsh 用 `send_message`）；
 - 方案性失败（思路不通）或子代理被中断（如额度耗尽）：`task_add` 新任务替代，或把原任务置回 pending 重派；
-- **被中断的子代理**（未汇报就消失，任务卡在 `claimed`/`in_progress`）：用 `task_update` 以 `force:true` + 原 owner 置回 `pending`（会记「强制改状态」日志），然后重新派发。
+- **被中断的子代理**（未汇报就消失，任务卡在 `claimed`/`in_progress`）：用 `task_update` 以 `force:true` + 原 owner 置回 `pending`（会记「强制改状态」日志），然后重新派发。dsh 上可先用 `list_agents` 确认它是真的不在了。
 
 **失败语义**：默认 `failurePolicy: "block"` —— 上游 `failed`/`skipped` 会**挡住**下游，不让它进入就绪列表。若业务上允许带着已知缺陷继续，建计划时传 `failurePolicy: "proceed"`，此时下游仍可派发，`task_ready` 会用 `blockedBy` 标注是哪个上游出了问题。
 
@@ -163,11 +210,28 @@ producer 发现阻塞/更好的方案
 - 需要完整结论时用 `task_notes(taskId, limit, offset)` 分页读回，`offset` 从最新往回数（0 = 最新一条）；
 - 笔记有上限（默认每任务 500 条、单条 4000 字符，可用环境变量 `TASKSWARM_MAX_NOTES` / `TASKSWARM_MAX_NOTE_CHARS` 调整）；超限会保留最新并记账到 `notesDropped`，绝不静默丢弃。
 
+## 平台适配
+
+MCP 服务端（`mcp/server.mjs`）三平台共用，**一份文件不改**；差异只在"谁派发子代理"。
+
+| | ZCode | dsh（DeepSeek Harness） | Codex CLI |
+| --- | --- | --- | --- |
+| 安装方式 | 插件（`.zcode-plugin/`） | `adapters/dsh/cordis.patch.yml` | `adapters/codex/config.toml` |
+| MCP 工具前缀 | `mcp__plugin_taskswarm_taskswarm__*` | `mcp__taskswarm__*` | `mcp__taskswarm__*` |
+| 子代理直连 | 无 | **有**（`report`/`send_message`/`list_agents`） | 无 |
+| 适配成熟度 | 原生（本插件诞生于此） | **MCP 链路已实测**；编排通道按原生工具映射 | MCP 已确认可挂载；子代理继承 MCP 工具随版本变化，**建议自行验证** |
+
+详见 [`adapters/dsh/README.md`](../../adapters/dsh/README.md) 与 [`adapters/codex/README.md`](../../adapters/codex/README.md)。
+
 ## 已知限制
 
 - **`force` 是审计机制而非权限机制**：MCP 协议层无法验证"你是不是主代理"，任何调用方都可传 `force:true`。它只用于恢复流程，并会在 log 留下「强制改状态」事件（含原 owner），**不要把它当作安全边界**。
 - 同波并行度受上下文与 token 成本限制，实测单波 4 个以内收益最稳。
-- 子代理无法互发消息，跨代理信息传递有延迟（取决于主代理何时收波转发）。
+- **子代理之间没有直接消息通道**（除 dsh 的父直连外）：跨代理信息走共享看板，是**拉取**语义——
+  有延迟（取决于对方何时轮询），也无法唤醒一个正在埋头干活的同伴。
+- **`workspace` 由调用方负责传递**：MCP 服务端各宿主的客户端都不会自动注入工作区路径。
+  漏传时会退到 server 进程的 cwd（可用宿主配置里的 `cwd` 兜底），多工作区并行时**必须显式传**，
+  否则多个蜂群的状态会串到同一个 `swarm-state.json`。
 
 ## 何时不用蜂群
 

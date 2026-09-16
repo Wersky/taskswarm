@@ -1,0 +1,19 @@
+# TaskSwarm · dsh 适配配置片段
+#
+# 把这段加进 dsh profile 的 cordis.patch.yml（例如 ~/.dsh/profiles/headless/cordis.patch.yml
+# 或 web profile 的同名文件），即可在 dsh 里使用 taskswarm。
+#
+# 与 ZCode 的关系：mcp/server.mjs 是同一份文件，直接以 stdio 挂载，不需要任何改动。
+# dsh 的 @deepseek-ai/dsh-mcp-client 会把工具注册成 mcp__taskswarm__<工具名>。
+
+- insert:
+    - id: mcp-taskswarm
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: taskswarm
+        transport: stdio
+        command: node
+        # 改成你 clone 下来的 taskswarm 路径
+        args: ['D:/zcode-data/plugins/taskswarm/mcp/server.mjs']
+        # 让 server 进程的 cwd 落在工作区，作为未显式传 workspace 时的兜底
+        cwd: 'D:/zcode-work/daily'

@@ -1,11 +1,32 @@
 # TaskSwarm · 任务蜂群
 
-> ZCode 插件的多 Agent 编排引擎：把一个目标拆成任务树，按依赖波次并行派发子代理，用共享看板让互不可见的子代理"看见"彼此。
+> 多 Agent 编排引擎：把一个目标拆成任务树，按依赖波次并行派发子代理，用共享看板让互不可见的子代理"看见"彼此。**MCP 服务端零依赖、三平台共用**（ZCode / dsh / Codex CLI）。
 
 [![tests](https://img.shields.io/badge/tests-123%20passed-brightgreen)](#测试与可靠性)
 [![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2090.3%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2098.0%25-brightgreen)](#测试与可靠性)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#工程要点)
 [![node](https://img.shields.io/badge/node-%3E%3D18-blue)](https://nodejs.org)
+
+---
+
+## 平台适配现状
+
+**一份 `mcp/server.mjs`，三个宿主共用**——差异只在"谁派发子代理、子代理能不能说话"。
+
+| | ZCode | dsh（DeepSeek Harness） | Codex CLI |
+| --- | --- | --- | --- |
+| MCP 挂载 | 插件自带（`.zcode-plugin/`） | `@deepseek-ai/dsh-mcp-client`（stdio） | `[mcp_servers.taskswarm]` |
+| 工具前缀 | `mcp__plugin_taskswarm_taskswarm__*` | `mcp__taskswarm__*` | `mcp__taskswarm__*` |
+| 派发子代理 | `Agent`（`run_in_background`） | `subagent`（`spawn`/`fork`） | `.codex/agents/*.toml` + `multi_agent` |
+| 父→子推送 | `SendMessage`（仅运行中） | **`send_message`**（可续期） | ❌ 无 |
+| 子→父回报 | ❌ 无 | **`report`** | ❌ 无 |
+| 观察/干预 | ❌ 无 | **`list_agents` / `interrupt_agent`** | ❌ 无 |
+| 适配成熟度 | **原生**（本插件诞生于此） | **MCP 链路已实测**（11 工具全通）；编排按原生工具映射 | MCP 挂载已确认；**子代理继承 MCP 工具随版本变化，需自行验证** |
+
+**结论**：看板通道在所有宿主可用——这就是跨平台的意义。dsh 另有子代理 ↔ 父代理直连通道，
+能力比 ZCode 版更强（看板从"唯一通道"降级为"公共黑板 + 持久化事实源"）。
+
+适配配置与实测记录见 [`adapters/dsh/`](adapters/dsh/README.md) 与 [`adapters/codex/`](adapters/codex/README.md)。
 
 ---
 
@@ -21,7 +42,8 @@ TaskSwarm 让主代理把目标拆成**任务树**，把互不依赖的部分**�
 
 ## 核心设计洞察：子代理之间没有通信能力
 
-这是本插件要解决的**根本约束**，也是在 ZCode 上做多 Agent 编排与在 Claude Code 上最大的不同。
+这是本插件要解决的**根本约束**，也是它与"主代理随手开几个子代理"最大的不同。
+（下述探测在 ZCode 上做的；dsh 的子代理体系更完整，见 [平台适配现状](#平台适配现状)。）
 
 我在实现前先做了能力探测，实测结论：
 
@@ -35,7 +57,7 @@ TaskSwarm 让主代理把目标拆成**任务树**，把互不依赖的部分**�
 
 这个约束直接决定了两条通信通道：
 
-1. **看板拉取（默认通道）**：子代理通过 MCP 主动读写共享看板。领任务用 `task_claim`、汇报进度用 `task_update`、了解全队状态用 `board`、读同伴的完整结论用 `task_notes`。因为是"拉取"，子代理永远不需要别人主动通知它。
+1. **看板拉取（默认通道）**：子代理通过 MCP 主动读写共享看板。领任务用 `task_claim`、汇报进度用 `task_update`、了解全队状态用 `board`、读同伴的完整结论用 `task_notes`。因为是"拉取"，子代理永远不需要别人主动通知它。**看板可读也可写**——任何代理都能给任意任务卡留言（`task_update` 的 owner 校验只管状态变更），这是子代理之间真正的双向通道。
 2. **主代理推送（补强通道）**：主代理是唯一有 `SendMessage` 的角色，因此它承担"信息搬运工"：派发新任务时把上游产出写进子代理 prompt；收到某子代理完成通知后，把关键结论转发给正在跑的、与之相关的其他子代理。**这条通道我做了实测**：给一个正在执行长任务的子代理推送带验证码的消息，它在中途收到了——推送通道可用，不是理论设计。
 
 ![架构图](docs/architecture.svg)
@@ -47,6 +69,9 @@ TaskSwarm 让主代理把目标拆成**任务树**，把互不依赖的部分**�
 调研结论（2026-09）：**Claude Flow / Ruflo**（61k★）、**barkain/claude-code-workflow-orchestration**、**Agent Teams** 都是 Claude Code 专用，依赖 ZCode 没有的 `TaskCreate` / `TeamCreate` / hooks 实验机制，无法移植。
 
 而 ZCode 这边：原生子代理**可以调用 MCP 工具**（已探针验证），但没有 SendMessage —— 所以互通必须设计成"看板拉取 + 主代理推送"双通道，而不可能靠代理间直连。
+
+（dsh 的情况更好：它原生提供 `send_message` / `report` / `list_agents`，子代理与父代理可直连。
+本插件的看板通道在这两个宿主都可用，dsh 上还能叠加直连通道。）
 
 本插件的架构是 **「MCP 提供确定性能力 + SKILL.md 提供编排流程」**：
 
@@ -61,9 +86,41 @@ TaskSwarm 让主代理把目标拆成**任务树**，把互不依赖的部分**�
 git clone https://github.com/Wersky/taskswarm.git
 ```
 
-然后在 ZCode 里：**设置 → 插件管理 → 发现 → 「+」添加本地目录市场**，指向包含 `marketplace.json` 的目录，安装 `taskswarm`，重启会话。
+### ZCode
+
+**设置 → 插件管理 → 发现 → 「+」添加本地目录市场**，指向包含 `marketplace.json` 的目录，安装 `taskswarm`，重启会话。
 
 插件清单使用 `${ZCODE_PLUGIN_ROOT}` / `${ZCODE_PROJECT_DIR}` 占位符，**不硬编码任何本机绝对路径**——换台机器克隆下来即可运行。
+
+### dsh（DeepSeek Harness）
+
+把 [`adapters/dsh/cordis.patch.yml`](adapters/dsh/cordis.patch.yml) 的 `insert` 段加进你的
+profile patch，改掉 `args` 里的路径：
+
+```yaml
+- insert:
+    - id: mcp-taskswarm
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: taskswarm
+        transport: stdio
+        command: node
+        args: ['/你的路径/taskswarm/mcp/server.mjs']
+```
+
+```bash
+dsh --profile <name> --dump-config | grep mcp-taskswarm   # 确认加载
+```
+
+### Codex CLI
+
+```bash
+codex mcp add taskswarm -- node /你的路径/taskswarm/mcp/server.mjs
+codex mcp list
+```
+
+注意 Codex 0.154+ 的 provider 只支持 `wire_api = "responses"`。详见
+[`adapters/codex/README.md`](adapters/codex/README.md)。
 
 ## 使用
 
@@ -212,15 +269,15 @@ MIT © 2026 Wersky
 <details>
 <summary>English</summary>
 
-**TaskSwarm** is a multi-agent orchestration plugin for ZCode: decompose a goal into a task tree, dispatch subagents in dependency waves, and let mutually-invisible subagents coordinate through a shared MCP board.
+**TaskSwarm** is a multi-agent orchestration engine: decompose a goal into a task tree, dispatch subagents in dependency waves, and let mutually-invisible subagents coordinate through a shared MCP board. **One zero-dependency MCP server, shared across ZCode / dsh / Codex CLI.**
+
+**Platform adaptation.** The MCP server is identical everywhere; only the delegation layer differs. ZCode uses `Agent` + `SendMessage`; dsh uses its native `subagent` / `send_message` / `report` / `list_agents` (richer — subagents can talk back to the orchestrator); Codex CLI wires the same server via `[mcp_servers.taskswarm]`. See [`adapters/`](adapters/) for configs and per-platform verification records.
 
 **Core insight.** Subagents in ZCode have **no `SendMessage` and no `Agent` tool** (verified by probing) — they can work, but they cannot talk to each other. This single constraint shapes the whole design: coordination must happen through two channels, (1) **board pull** — subagents read/write a shared MCP board (`task_claim` / `task_update` / `board` / `task_notes`), and (2) **orchestrator push** — the main agent is the only role with `SendMessage`, so it forwards key results between running subagents (verified working: a code sent mid-task reached a running subagent).
 
 **Deterministic work lives in the MCP server** (task tree, dependency resolution, atomic claiming, crash-safe persistence, board rendering); **the orchestration loop lives in the main agent** (what to decompose, whom to dispatch, when to collect). Zero third-party dependencies.
 
 **Reliability.** 123 tests (all passing), 90.3% line / 98.0% function coverage. Every test drives a **real spawned MCP server process**, because the guarantees that matter — no data corruption under concurrent multi-process writes, no double-claiming of the same task — only exist across processes. Measured: two processes appending 120 notes each previously corrupted the state file (217 tool errors, unrecoverable plan loss) and 60 concurrent claim attempts double-claimed 4 times; both are now zero, locked by regression tests. Writes are atomic (temp → fsync → rename) behind a cross-process file lock with stale-lock recovery; corrupt files are backed up rather than silently discarded.
-
-**Portable by design** — plugin manifest uses `${ZCODE_PLUGIN_ROOT}` placeholders, no hardcoded absolute paths.
 
 MIT © 2026 Wersky
 

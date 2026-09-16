@@ -1,0 +1,25 @@
+# TaskSwarm · Codex CLI 适配配置片段
+#
+# 把 [mcp_servers.taskswarm] 这一段加进 ~/.codex/config.toml
+# （Windows 下是 %CODEX_HOME%\config.toml，例如 D:/Codex/config.toml）
+#
+# 或者直接用 CLI 命令添加（推荐）：
+#   codex mcp add taskswarm -- node D:/zcode-data/plugins/taskswarm/mcp/server.mjs
+#
+# 与 ZCode / dsh 的关系：mcp/server.mjs 是同一份文件，不需要任何改动。
+# 工具注册为 mcp__taskswarm__<工具名>。
+
+[mcp_servers.taskswarm]
+command = "node"
+# 改成你 clone 下来的 taskswarm 路径
+args = ["D:/zcode-data/plugins/taskswarm/mcp/server.mjs"]
+
+# 蜂群任务偏长，建议放宽单次工具调用超时（默认 60s）
+tool_timeout_sec = 600
+
+# ── 最小可用的子代理定义（可选）────────────────────────────────
+# 放到项目的 .codex/agents/swarm-worker.toml，
+# 或用 codex 的 multi_agent 特性派发时引用。
+#
+# name = "swarm-worker"
+# description = "蜂群成员：执行单个任务树节点，通过 taskswarm 看板互通"
