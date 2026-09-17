@@ -150,7 +150,7 @@ codex mcp list
 
 - **< 3 个子项**：拆解开销大于并行收益，主代理直接做。
 - **强串行依赖**：拆了也是一波一波等，没有并行度。
-- **需要频繁来回讨论**：用圆桌讨论（[roundtable](../roundtable) 插件）更合适。
+- **需要频繁来回讨论**：用圆桌讨论（[roundtable](https://github.com/Wersky/roundtable) 插件）更合适。
 - **单纯查资料 / 读代码**：Explore 子代理更省。
 
 ### 一条硬规则：改同一批文件的子任务必须串行
@@ -174,13 +174,13 @@ producer 置 done ──▶ 改道 pending_review ──▶ 下游被阻断
 - 支持多级审核链（A 过审 → B 开始 → B 过审 → C 放行）；
 - **不配 reviewer 行为完全不变**（向后兼容）。
 
-配合 swarmbridge 的 `plan` 消息可做**跨机器 PPR**：对方发计划（含 role/reviewer 分工）→ 本地建任务树继承审核者 → 本地跑审核门 → 结果回报。
+配合 [swarmbridge](https://github.com/Wersky/swarmbridge) 的 `plan` 消息可做**跨机器 PPR**：对方发计划（含 role/reviewer 分工）→ 本地建任务树继承审核者 → 本地跑审核门 → 结果回报。
 
 ### 提案与采纳回路（2.2.0）
 
 审核门管「产出合不合格」，提案回路管「**计划要不要改**」——子代理干活时最清楚原计划缺了什么。
 
-- **提**：producer 遇到阻塞或有更好方案，用 swarmbridge 的 `proposal` 消息发到桥线程（`data = {forTask?, problem?, items?, rationale?}`）；单机场景可直接写 `task_update` 笔记，由主代理转发。
+- **提**：producer 遇到阻塞或有更好方案，用 [swarmbridge](https://github.com/Wersky/swarmbridge) 的 `proposal` 消息发到桥线程（`data = {forTask?, problem?, items?, rationale?}`）；单机场景可直接写 `task_update` 笔记，由主代理转发。
 - **采**：reviewer 认为建议合理，就在 `task_review` 里带上 `proposals`——**过审的同时新计划项自动进树**（可带 `role`/`reviewer`/`assignee`/`dependsOn`），返回 `adopted:{count, ids}`。
 - **派**：主代理按新任务的 `assignee` 提示分派。`assignee` 只是建议执行者，**不影响 `task_claim` 的领取权限**（与触发审核门的 `reviewer` 本质不同）。
 - **驳回不采纳**：`reject` 会**完全忽略** `proposals`，驳回不得夹带新任务。
@@ -259,7 +259,7 @@ npm run coverage  # 行覆盖 90.3% (895/991) · 函数覆盖 98.0% (99/101)
 - [ ] 子代理心跳与超时自动回收（当前失联任务需主代理手动 `force` 恢复）
 - [ ] 任务产出物登记（结构化记录每个任务的产物路径，便于汇总与验收）
 - [ ] 跨工作区蜂群（当前状态文件按工作区隔离）
-- [ ] 与 `roundtable` 插件的组合流程（讨论定方案 → 蜂群做执行）
+- [ ] 与 [`roundtable`](https://github.com/Wersky/roundtable) 插件的组合流程（讨论定方案 → 蜂群做执行）
 
 ## 已知限制
 
@@ -267,6 +267,18 @@ npm run coverage  # 行覆盖 90.3% (895/991) · 函数覆盖 98.0% (99/101)
 - **推送有延迟**：子代理间信息传递依赖主代理收波转发，不是实时的。
 - **`force` 非安全边界**：见上文"可靠性机制"末条。
 - **多蜂群共用工作区会共享状态文件**：长期任务请用独立工作区。
+
+## 姊妹插件（蜂群套件）
+
+三个插件同属一套「蜂群」套件，各司其职，可独立使用、组合互通：
+
+| 插件 | 职责 | 仓库 |
+| --- | --- | --- |
+| **TaskSwarm**（本仓库） | 同机任务蜂群：拆解、并行派发、共享看板、PPR 审核门 | 本仓库 |
+| **SwarmBridge** | 跨机器消息桥：以 GitHub Issues 为总线，让不同机器上的 Agent 互通（`plan` / `proposal` / `discuss` 结构化消息） | [Wersky/swarmbridge](https://github.com/Wersky/swarmbridge) |
+| **Roundtable** | 圆桌讨论：多 Agent 按序发言交锋、输出会议纪要，可拉远端成员同席（走 SwarmBridge） | [Wersky/roundtable](https://github.com/Wersky/roundtable) |
+
+推荐组合：圆桌讨论定方案 → TaskSwarm 拆任务执行；跨机协作时用 SwarmBridge 分发计划与回报结果（见上文「跨机器 PPR」）。
 
 ## License
 

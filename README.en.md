@@ -142,7 +142,7 @@ The main agent shows the decomposed task tree, dispatches in dependency waves, a
 
 - **Fewer than 3 subtasks** — decomposition overhead outweighs the parallelism; just do it directly.
 - **Tightly serial dependencies** — you would still wait wave by wave, with no parallelism to gain.
-- **Frequent back-and-forth discussion** — use the roundtable plugin instead.
+- **Frequent back-and-forth discussion** — use the [roundtable](https://github.com/Wersky/roundtable) plugin instead.
 - **Just reading code or searching** — an Explore subagent is cheaper.
 
 ### One hard rule: subtasks touching the same files must be serialized
@@ -166,13 +166,13 @@ producer sets done ──▶ rerouted to pending_review ──▶ downstream blo
 - Multi-level review chains are supported (A passes → B starts → B passes → C released);
 - **With no reviewer configured, behavior is completely unchanged** (backward compatible).
 
-Combined with swarmbridge's `plan` message this enables **cross-machine PPR**: the peer sends a plan (with `role`/`reviewer` assignments) → you build a local task tree inheriting the reviewers → the local review gate runs → results are reported back.
+Combined with [swarmbridge](https://github.com/Wersky/swarmbridge)'s `plan` message this enables **cross-machine PPR**: the peer sends a plan (with `role`/`reviewer` assignments) → you build a local task tree inheriting the reviewers → the local review gate runs → results are reported back.
 
 ### Proposal Loop (2.2.0)
 
 The review gate governs *whether output is acceptable*; the proposal loop governs **whether the plan itself should change** — and the subagents doing the work are the ones who knows what the plan is missing.
 
-- **Propose**: a producer that hits a blocker or finds a better approach sends a swarmbridge `proposal` message to the bridge thread (`data = {forTask?, problem?, items?, rationale?}`). On a single machine it can simply write a `task_update` note and let the main agent forward it.
+- **Propose**: a producer that hits a blocker or finds a better approach sends a [swarmbridge](https://github.com/Wersky/swarmbridge) `proposal` message to the bridge thread (`data = {forTask?, problem?, items?, rationale?}`). On a single machine it can simply write a `task_update` note and let the main agent forward it.
 - **Adopt**: if the reviewer finds the suggestion sound, it attaches `proposals` to `task_review` — **the new plan items enter the tree as the review passes** (carrying optional `role`/`reviewer`/`assignee`/`dependsOn`), and the call returns `adopted:{count, ids}`.
 - **Dispatch**: the main agent dispatches by the new tasks' `assignee` hint. `assignee` is only a suggestion and **does not affect who can `task_claim`** (fundamentally different from `reviewer`, which arms the gate).
 - **Rejection adopts nothing**: `reject` **ignores `proposals` entirely**; a rejection cannot smuggle in new tasks.
@@ -251,7 +251,7 @@ The most instructive one: the original `board` owner-filter test asserted `!A ||
 - [ ] Subagent heartbeat and automatic reclamation on timeout (currently a lost task needs a manual `force` from the main agent)
 - [ ] Task artifact registry (structured record of each task's output paths, for summarization and acceptance)
 - [ ] Cross-workspace swarms (state files are currently isolated per workspace)
-- [ ] Combined flow with the `roundtable` plugin (discuss to settle a plan → swarm to execute it)
+- [ ] Combined flow with the [`roundtable`](https://github.com/Wersky/roundtable) plugin (discuss to settle a plan → swarm to execute it)
 
 ## Known Limitations
 
@@ -259,6 +259,18 @@ The most instructive one: the original `board` owner-filter test asserted `!A ||
 - **Push has latency**: inter-subagent information flows via the board (pull) or the main agent's forwarding — neither is real time.
 - **`force` is not a security boundary**: see the last item under "Reliability mechanisms."
 - **Multiple swarms sharing one workspace share one state file**: use a separate workspace for long-running work.
+
+## Sister Plugins (the Swarm suite)
+
+These three plugins form one "swarm" suite — each works standalone, together they interlock:
+
+| Plugin | Role | Repo |
+| --- | --- | --- |
+| **TaskSwarm** (this repo) | On-machine task swarms: decomposition, parallel dispatch, shared board, PPR review gate | this repo |
+| **SwarmBridge** | Cross-machine message bus over GitHub Issues (`plan` / `proposal` / `discuss` structured messages between agents on different machines) | [Wersky/swarmbridge](https://github.com/Wersky/swarmbridge) |
+| **Roundtable** | Multi-agent roundtable: ordered turns, cross-fire, meeting minutes — with remote members joining over SwarmBridge | [Wersky/roundtable](https://github.com/Wersky/roundtable) |
+
+Recommended pairing: roundtable settles the plan → TaskSwarm executes it; use SwarmBridge to distribute plans and report results across machines (see "cross-machine PPR" above).
 
 ## License
 
