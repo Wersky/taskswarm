@@ -20,7 +20,7 @@
 | MCP wiring | Bundled plugin (`.zcode-plugin/`) | `@deepseek-ai/dsh-mcp-client` (stdio) | `[mcp_servers.taskswarm]` |
 | Tool prefix | `mcp__plugin_taskswarm_taskswarm__*` | `mcp__taskswarm__*` | `mcp__taskswarm__*` |
 | Dispatch subagents | `Agent` (`run_in_background`) | `subagent` (`spawn`/`fork`) | `.codex/agents/*.toml` + `multi_agent` |
-| Parent → child push | `SendMessage` (running children only) | **`send_message`** (continuable) | ❌ none |
+| Parent → child push | `SendMessage` (delivered mid-turn to running children; **a `done` child can be woken and resumed**) | **`send_message`** (continuable) | ❌ none |
 | Child → parent report | ❌ none | **`report`** | ❌ none |
 | Observe / intervene | ❌ none | **`list_agents` / `interrupt_agent`** | ❌ none |
 | Maturity | **Native** (the plugin was born here) | **MCP link tested** (all 11 tools); orchestration mapped to native tools | Mount confirmed; **subagent MCP inheritance is version-dependent — verify yourself** |
@@ -61,7 +61,9 @@ In other words: **subagents are mute workers — they can do the job, but they c
 That constraint dictates the communication design:
 
 1. **Board pull (primary channel)** — Subagents read and write a shared board over MCP: `task_claim` to take work, `task_update` to report progress, `board` for the team's status, `task_notes` for a peer's full conclusions. Because it is a *pull*, a subagent never needs anyone to notify it. **The board is both readable and writable** — any agent can leave a note on any task card (`task_update`'s owner check only guards *status transitions*), which makes it a genuine two-way channel between peers.
-2. **Orchestrator push (supplementary channel)** — The main agent is the only role holding `SendMessage`, so it acts as the courier: it writes upstream results into a new subagent's prompt, and forwards key conclusions to running subagents that depend on them. **I verified this channel**: a message carrying a verification code reached a subagent in the middle of a long task — it works, it is not a theoretical design.
+
+   Pull is also the price: **the server has no push mechanism at all** (no unread flag, no subscription), so a written note notifies nobody. Three measured traps — `task_claim`'s response **carries no notes** (you cannot see messages left before you claim); `board` shows only the **latest** note's 60-char excerpt (write your own progress and a peer's message scrolls off it), and `@xxx` names the *task owner*, **not the note author**; and leaving a note on an unclaimed task **silently makes you its owner**. So receiving means deliberately polling `task_notes` and reading each note's `owner` — `board` is for an overview, never for inbox.
+2. **Orchestrator push (supplementary channel)** — The main agent is the only role holding `SendMessage`, so it acts as the courier: it writes upstream results into a new subagent's prompt, and forwards key conclusions to running subagents that depend on them. **I verified this channel, and it works in both states**: a message carrying a verification code reached a subagent mid-task without interrupting it; and a follow-up question sent to a subagent that had already reported `done` **woke it in the background with its full context intact** — it reasoned back from the sample data it had written, admitted the flaw in its own draft, and proactively wrote the clarification onto its own task card. So "ask a finished peer" is viable; it just has to route through the main agent.
 
 ![Architecture](docs/architecture.svg)
 
@@ -256,7 +258,10 @@ The most instructive one: the original `board` owner-filter test asserted `!A ||
 ## Known Limitations
 
 - **Parallelism**: ≤ 4 background subagents per wave is recommended; beyond that, context switching and token overhead eat the gains.
-- **Push has latency**: inter-subagent information flows via the board (pull) or the main agent's forwarding — neither is real time.
+- **No push, only pull**: the server has no notify, no unread flag, no subscription. A written note sits in the data and notifies nobody; receiving depends entirely on a subagent polling `task_notes`.
+- **`board` is not an inbox**: it shows only the latest note and omits the author; `task_claim` returns no notes.
+- **A note on an unclaimed task hijacks its owner**: wait until the peer has `task_claim`ed.
+- **Push has latency**: inter-subagent information flows via the board (pull) or the main agent's forwarding — neither is real time (though the main agent *can* wake a `done` subagent).
 - **`force` is not a security boundary**: see the last item under "Reliability mechanisms."
 - **Multiple swarms sharing one workspace share one state file**: use a separate workspace for long-running work.
 
