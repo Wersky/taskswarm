@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 export const SERVER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server.mjs');
@@ -77,6 +78,17 @@ export function makeWorkspace(label = 'ws') {
 export function rmWorkspace(dir) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows 偶发占用，忽略 */ }
 }
+
+/**
+ * 直接打开工作区的 SQLite 状态库做落盘断言（3.0 起状态落在 swarm-state.db）。
+ * 返回 { db, close }；仅测试内只读使用。要求 Node ≥ 23.4（node:sqlite 内置可用）。
+ */
+export function openDb(ws) {
+  const db = new DatabaseSync(path.join(ws, '任务蜂群', 'swarm-state.db'));
+  return { db, close: () => { try { db.close(); } catch { /* ignore */ } } };
+}
+
+
 
 /**
  * 连接一个 MCP server 子进程。

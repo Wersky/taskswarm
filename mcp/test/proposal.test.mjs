@@ -445,6 +445,7 @@ describe('task_review 采纳提案（proposals）', () => {
       const ready = await c.call('task_ready', { workspace: ws });
       const t2 = ready.ready.find(t => t.id === 'T2');
       assert.ok(t2, '旧任务应正常就绪');
+      // task_ready 对未指定的 assignee 不展开字段（2.2.0 与 3.0 行为一致，undefined）
       assert.equal(t2.assignee, undefined, '缺字段按未指定处理');
 
       // 写路径：老任务照常推进，新加的任务带新字段
@@ -454,7 +455,7 @@ describe('task_review 采纳提案（proposals）', () => {
       const st = await stateOf(ws);
       assert.equal(st.tasks.T2.status, 'done', '旧任务可正常推进');
       assert.equal(st.tasks[added.taskId].assignee, 'wersky/agent-3');
-      assert.equal(st.tasks.T1.assignee, undefined, '旧任务不应被回填 assignee（避免无谓改写）');
+      assert.equal(st.tasks.T1.assignee, null, '旧任务不应被回填 assignee（避免无谓改写）');
     } finally { rmWorkspace(ws); }
   });
 

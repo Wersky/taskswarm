@@ -5,7 +5,7 @@
 [中文](README.md) | English
 
 [![tests](https://img.shields.io/badge/tests-123%20passed-brightgreen)](#testing--reliability)
-[![coverage](https://img.shields.io/badge/coverage-lines%2090.3%25%20%C2%B7%20functions%2098.0%25-brightgreen)](#testing--reliability)
+[![coverage](https://img.shields.io/badge/coverage-lines%2088.6%25%20%C2%B7%20functions%2095.1%25-brightgreen)](#testing--reliability)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#engineering-notes)
 [![node](https://img.shields.io/badge/node-%3E%3D18-blue)](https://nodejs.org)
 
@@ -27,7 +27,7 @@
 
 **Bottom line**: the board channel works on every host — that is what makes this portable. dsh additionally offers direct subagent ↔ parent channels, so it is strictly more capable: the board drops from "the only channel" to "a shared blackboard plus the durable source of truth."
 
-> **Verification boundary (no overclaiming)**: of the three hosts, **only ZCode has run a real end-to-end swarm** — the plugin was born there, and all 123 tests exercise that path. dsh is verified up to "MCP link + all 11 tools + dependency guard" (driven step by step the same way `dsh-mcp-client` does it); Codex is verified up to "MCP mount confirmed." **The full model-driven swarm has not yet been run on either** — every usable relay key was out of quota on the day of testing. Codex carries one further version-dependent risk: whether subagents inherit the parent session's MCP tools varies by version and must be verified yourself. See the verification-record tables in each `adapters/` doc.
+> **Verification boundary (no overclaiming)**: of the three hosts, **only ZCode has run a real end-to-end swarm** — the plugin was born there, and all 149 tests exercise that path. dsh is verified up to "MCP link + all 11 tools + dependency guard" (driven step by step the same way `dsh-mcp-client` does it); Codex is verified up to "MCP mount confirmed." **The full model-driven swarm has not yet been run on either** — every usable relay key was out of quota on the day of testing. Codex carries one further version-dependent risk: whether subagents inherit the parent session's MCP tools varies by version and must be verified yourself. See the verification-record tables in each `adapters/` doc.
 
 Configs and per-platform verification records: [`adapters/dsh/`](adapters/dsh/README.md) and [`adapters/codex/`](adapters/codex/README.md).
 
@@ -62,7 +62,7 @@ That constraint dictates the communication design:
 
 1. **Board pull (primary channel)** — Subagents read and write a shared board over MCP: `task_claim` to take work, `task_update` to report progress, `board` for the team's status, `task_notes` for a peer's full conclusions. Because it is a *pull*, a subagent never needs anyone to notify it. **The board is both readable and writable** — any agent can leave a note on any task card (`task_update`'s owner check only guards *status transitions*), which makes it a genuine two-way channel between peers.
 
-   Pull is also the price: **the server has no push mechanism at all** (no unread flag, no subscription), so a written note notifies nobody. Three measured traps — `task_claim`'s response **carries no notes** (you cannot see messages left before you claim); `board` shows only the **latest** note's 60-char excerpt (write your own progress and a peer's message scrolls off it), and `@xxx` names the *task owner*, **not the note author**; and leaving a note on an unclaimed task **silently makes you its owner**. So receiving means deliberately polling `task_notes` and reading each note's `owner` — `board` is for an overview, never for inbox.
+   3.0 closes the receiving gaps: `task_claim`'s response now **carries the full note history** (claim and start working — no extra query needed); `board` shows the **two most recent** excerpts per task (80 chars each) with a total count; and notes no longer hijack task ownership. What remains pull-based on the MCP side: no subscription-style push (a `rev` counter supports cheap polling, and an optional webhook pushes to external integrations). The human side gets a Web console with live SSE updates.
 2. **Orchestrator push (supplementary channel)** — The main agent is the only role holding `SendMessage`, so it acts as the courier: it writes upstream results into a new subagent's prompt, and forwards key conclusions to running subagents that depend on them. **I verified this channel, and it works in both states**: a message carrying a verification code reached a subagent mid-task without interrupting it; and a follow-up question sent to a subagent that had already reported `done` **woke it in the background with its full context intact** — it reasoned back from the sample data it had written, admitted the flaw in its own draft, and proactively wrote the clarification onto its own task card. So "ask a finished peer" is viable; it just has to route through the main agent.
 
 ![Architecture](docs/architecture.svg)
@@ -192,7 +192,7 @@ The review gate governs *whether output is acceptable*; the proposal loop govern
 | `task_notes` | everyone | **Read full notes** (paginated, `limit ≤ 200`) |
 | `task_add` | main agent / subagent | Add tasks mid-flight (decomposition continues as work proceeds) |
 | `task_review` | **reviewer** | **PPR adjudication**: `approve` releases downstream / `reject` sends it back; may carry `proposals` adopted on pass |
-| `board` | everyone | **Shared progress board** (status, owner, latest note excerpt) |
+| `board` | everyone | **Shared progress board** (status, owner, two latest note excerpts) |
 | `plan_reset` / `state` | main agent | Restart / persist and restore state |
 
 > The real tool prefix is `mcp__plugin_taskswarm_taskswarm__` on ZCode, for example `mcp__plugin_taskswarm_taskswarm__task_claim`. On dsh and Codex it is `mcp__taskswarm__`.
@@ -201,11 +201,11 @@ The review gate governs *whether output is acceptable*; the proposal loop govern
 
 ## Testing & Reliability
 
-**123 tests, all passing; 90.3% line coverage, 98.0% function coverage.**
+**149 tests, all passing; 88.6% line coverage, 95.1% function coverage** across ~1,460 lines (core / protocol / console); uncovered lines are mostly defensive error branches.
 
 ```bash
-npm test          # 123 tests, 0 fail
-npm run coverage  # 90.3% lines (895/991) · 98.0% functions (99/101)
+npm test          # 149 tests, 0 fail
+npm run coverage  # 88.6% lines (1293/1460) · 95.1% functions (135/142)
 ```
 
 Requires Node ≥ 18, with no test-framework dependency (uses built-in `node:test` + `node:assert/strict`).
@@ -259,7 +259,7 @@ The most instructive one: the original `board` owner-filter test asserted `!A ||
 
 - **Parallelism**: ≤ 4 background subagents per wave is recommended; beyond that, context switching and token overhead eat the gains.
 - **No push, only pull**: the server has no notify, no unread flag, no subscription. A written note sits in the data and notifies nobody; receiving depends entirely on a subagent polling `task_notes`.
-- **`board` is not an inbox**: it shows only the latest note and omits the author; `task_claim` returns no notes.
+- **MCP-side updates are pull-only**: sub-agents poll the board (a `rev` counter and optional webhook mitigate latency); humans get the Web console with live SSE.
 - **A note on an unclaimed task hijacks its owner**: wait until the peer has `task_claim`ed.
 - **Push has latency**: inter-subagent information flows via the board (pull) or the main agent's forwarding — neither is real time (though the main agent *can* wake a `done` subagent).
 - **`force` is not a security boundary**: see the last item under "Reliability mechanisms."

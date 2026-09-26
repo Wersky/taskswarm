@@ -5,7 +5,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { connect, makeWorkspace, rmWorkspace } from './helpers.mjs';
+import { connect, makeWorkspace, rmWorkspace, openDb } from './helpers.mjs';
 
 describe('状态机与归属守卫', () => {
   let c;
@@ -306,8 +306,12 @@ describe('笔记治理与 task_notes 分页', () => {
       assert.ok(n.notes[0].note.length < long.length);
       assert.match(n.notes[0].note, /已截断/);
 
-      const disk = JSON.parse(fs.readFileSync(path.join(ws, '任务蜂群', 'swarm-state.json'), 'utf8'));
-      assert.ok(disk.tasks.a.notes[0].note.length < long.length, '磁盘上必须是截断后的');
+      // 3.0 起状态在 SQLite：直接查库验证落盘的就是截断后的
+      const { db, close } = openDb(ws);
+      try {
+        const row = db.prepare("SELECT note FROM notes WHERE taskId='a' ORDER BY id DESC LIMIT 1").get();
+        assert.ok(row.note.length < long.length, '库里的必须是截断后的');
+      } finally { close(); }
     } finally { rmWorkspace(ws); }
   });
 
@@ -324,9 +328,14 @@ describe('笔记治理与 task_notes 分页', () => {
       assert.equal(n.total + n.notesDropped, N, '保留 + 丢弃 == 写入总数');
       assert.equal(n.notes.at(-1).note, `n${N - 1}`, '应保留最新的');
 
-      const disk = JSON.parse(fs.readFileSync(path.join(ws, '任务蜂群', 'swarm-state.json'), 'utf8'));
-      assert.equal(disk.tasks.a.notes.length, LIMIT, '磁盘上也必须受限');
-      assert.equal(disk.tasks.a.notesDropped, N - LIMIT);
+      // 3.0 起状态在 SQLite：库里条数受限且 notesDropped 记账在任务行上
+      const { db, close } = openDb(ws);
+      try {
+        const cnt = db.prepare("SELECT COUNT(*) c FROM notes WHERE taskId='a'").get().c;
+        assert.equal(cnt, LIMIT, '库里也必须受限');
+        const dropped = db.prepare("SELECT notesDropped FROM tasks WHERE id='a'").get().notesDropped;
+        assert.equal(dropped, N - LIMIT);
+      } finally { close(); }
     } finally { rmWorkspace(ws); }
   });
 

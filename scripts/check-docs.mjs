@@ -33,7 +33,9 @@ const toolsReply = JSON.parse(String(probe.stdout).trim().split('\n')[0]);
 const realTools = toolsReply.result.tools.map(t => t.name);
 const realToolSet = new Set(realTools);
 
-const serverSrc = read('mcp/server.mjs');
+const serverSrc = ['mcp/server.mjs', 'mcp/core.mjs', 'ui/server.mjs']
+  .map(f => { try { return read(f); } catch { return ''; } })
+  .join(String.fromCharCode(10));
 const manifest = JSON.parse(read('.zcode-plugin/plugin.json'));
 const pkg = JSON.parse(read('package.json'));
 

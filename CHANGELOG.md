@@ -5,6 +5,57 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [3.0.0] - 2026-09-25
+
+「产品版」：从单机插件升级为可对外交付的协作工具——可靠存储、可观测、有界面。
+
+### Changed
+
+- **存储层整体换为 SQLite**（`mcp/core.mjs`，Node ≥ 23.4 内置 `node:sqlite`，零 npm 依赖保持）：
+  WAL 模式 + `BEGIN IMMEDIATE` 写事务取代「JSON 文件 + 自实现文件锁 + rename 原子写」；
+  编程模型保持「state 对象整体读改写」，业务语义与 2.2.0 兼容。首次打开发现旧
+  `swarm-state.json` 自动无损迁移并归档为 `.migrated-backup.json`。架构拆分为
+  `mcp/core.mjs`（存储+业务）/ `mcp/server.mjs`（MCP 协议层）/ `ui/server.mjs`（控制台）。
+- **`plan_reset` 恢复 unlink 语义**：锁内删库文件重建——它是损坏恢复的出路，
+  不能被「库打不开」堵死。库损坏时构造不再抛错（broken 标记），除 plan_reset
+  外的读写入口给出含 `.corrupt-*.db` 备份位置的可行动错误。
+
+### Added
+
+- **Web 控制台（`ui/server.mjs`）**：零依赖 HTTP + SSE + 内嵌单页前端（中文）。
+  泳道看板、任务详情（笔记全文 + 事件流）、审批按钮（通过 / 打回 + 理由）。
+  审批走 `store.taskReview()` 同一核心函数，不绕状态机；默认只监听 127.0.0.1。
+  启动：`node ui/server.mjs --workspace <项目目录> --reviewer <身份> [--port 7788]`。
+- **心跳与惰性超时回收**：claimed/in_progress 任务由 `lastHeartbeat` 跟踪（领取、
+  状态转移、写笔记均刷新），超过 `TASKSWARM_STALE_MINUTES`（默认 30，0=禁用）
+  无心跳自动回 pending 并记「超时回收」审计事件——失联自愈不再依赖主代理 force。
+- **审计事件表（append-only）**：`events` 表永不截断，全部状态流转（含强制操作、
+  审核裁决、超时回收）可追溯。
+- **rev 全局版本号**：所有工具响应携带，每次写事务自增；`plan_get` / `board` /
+  `task_ready` / `task_notes` 客户端可轮询对比，避免盲目全量重读。
+- **webhook 通知（可选）**：`TASKSWARM_WEBHOOK_URL` 配置后，写事务提交即
+  fire-and-forget POST `{rev, events}`（2s 超时静默失败），弥补 MCP 拉取语义延迟。
+- **成本钩子**：`task_update` 新增可选 `cost:{tokens,minutes}` 累加字段，
+  `board` 汇总全群 Σtokens / Σminutes。
+
+### Fixed
+
+- **看板收信能力**（2.2.0 缺陷）：board 从「每任务最新 1 条 × 60 字符」升级为
+  「最近 2 条 × 80 字符 + 总数提示」，子代理扫一眼看板即可了解同伴进展。
+- **task_claim 一次拿全上下文**（2.2.0 缺陷）：返回体补 `notes`（全量）、`status`、
+  `assignee`、`reviewer`、`parent`、`role`、`blockedBy`——领取即开工，不必二次查询。
+- **留言不再夺取所有权**（2.2.0 缺陷）：无主任务上写笔记/报成本不再把留言者写成
+  owner；归属只来自 task_claim 与状态转移。
+- **done/skipped 回退收紧**（2.2.0 缺陷）：曾经过审核门的任务，回退只能由
+  reviewer 本人（或主代理 force）执行；failed → pending 保持 owner 可（失败重试
+  合理）。reviewer 本人回退等同 owner 权限。
+- **并发首开踩踏**：多进程首次同时打开同一工作区由初始化锁串行化（含持锁进程
+  存活探测，SIGKILL 残锁立即抢占），不再出现建表竞争。
+
+### Removed
+
+- `waveOf` 死代码；文件锁体系（业务互斥已由 SQLite 事务承担，初始化锁除外）。
+
 ## [Unreleased]
 
 ### Added
