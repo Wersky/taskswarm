@@ -119,6 +119,8 @@ function positiveIntEnv(name, fallback, max) {
 /** 每次读取环境变量（而非模块级常量），便于测试在同一进程内切换 */
 function maxNotes() { return positiveIntEnv('TASKSWARM_MAX_NOTES', DEFAULT_MAX_NOTES, 100000); }
 function maxNoteChars() { return positiveIntEnv('TASKSWARM_MAX_NOTE_CHARS', DEFAULT_MAX_NOTE_CHARS, 1000000); }
+/** events 表保留上限（条）。超出部分归档到 JSONL 文件后从库内删除；非法值回退默认 5000。 */
+function maxEvents() { return positiveIntEnv('TASKSWARM_MAX_EVENTS', 5000, 100000000); }
 /** 心跳超时（分钟）。claimed/in_progress 超过该时长无心跳 → 惰性回收回 pending。0 = 禁用。 */
 export function staleMinutes() {
   const raw = process.env.TASKSWARM_STALE_MINUTES;
@@ -771,6 +773,7 @@ export class Store {
       const rev = this.rev();
       db.exec('COMMIT');
       this.#notifyWebhook(rev, baseEventId);
+      this.#archiveEventsIfNeeded();
       return { result: out?.__result, rev };
     } catch (err) {
       try { db.exec('ROLLBACK'); } catch { /* ignore */ }
@@ -828,6 +831,121 @@ export class Store {
       req.on('timeout', () => req.destroy());
       req.end(body);
     } catch { /* 静默：webhook 失败不影响主流程 */ }
+  }
+
+  /**
+   * events 表归档治理（3.0.1）：append-only 是审计承诺，但长期运行的库会无限膨胀。
+   * 超过 TASKSWARM_MAX_EVENTS（默认 5000）时，把最旧的溢出部分导出为
+   * events-archive-<序号>.jsonl（每份最多 maxEvents 行封顶，剩余留下轮渐进收敛），
+   * 再从库内删除；meta.eventsDroppedTotal 记账（总数 = 库内现存 + 累计归档）。
+   *
+   * 原子性与并发：
+   *   - 先写文件成功再 DELETE——文件写失败则静默跳过本轮（绝不阻断主写、绝不丢事件）；
+   *   - events-archive.lock 轻量锁防两进程同时归档产生重复行（含 pid 存活探测），
+   *     等不到锁就跳过本轮——归档是治理不是依赖，下一笔写操作会再触发。
+   * 触发点：mutate() 与 planCreate() 的事务提交之后（事务外执行，不占用写锁）。
+   */
+  #archiveEventsIfNeeded() {
+    if (this.#broken) return;
+    try {
+      const cap = maxEvents();
+      const total = Number(this.#db.prepare('SELECT COUNT(*) c FROM events').get()?.c ?? 0);
+      if (!(total > cap)) return;
+      const lockPath = this.#dbPath + '.archive-lock';
+      if (!this.#tryArchiveLock(lockPath)) return; // 等不到锁：跳过本轮，下次写再治理
+      try {
+        // 锁内复查（另一进程可能刚归档完）
+        const inLib = Number(this.#db.prepare('SELECT COUNT(*) c FROM events').get()?.c ?? 0);
+        const overflow = inLib - cap;
+        if (overflow <= 0) return;
+        const exportLimit = Math.min(overflow, cap); // 单份文件容量 = maxEvents 行
+        const rows = this.#db.prepare(
+          'SELECT id,at,event,taskId,owner,detail FROM events ORDER BY id ASC LIMIT ?'
+        ).all(exportLimit);
+        if (rows.length === 0) return;
+
+        // 归档文件采用追加语义：写到「当前最大序号」文件里，装满 cap 行才开新序号——
+        // 否则每笔写事务溢出一条就建一个新文件，序号会爆炸。
+        const dir = path.dirname(this.#dbPath);
+        let maxSeq = 0;
+        try {
+          for (const name of fs.readdirSync(dir)) {
+            const m = /^events-archive-(\d+)\.jsonl$/.exec(name);
+            if (m) maxSeq = Math.max(maxSeq, Number(m[1]));
+          }
+        } catch { /* 目录读取失败按无归档处理 */ }
+        let targetFile = null;
+        let append = false;
+        if (maxSeq > 0) {
+          const candidate = path.join(dir, `events-archive-${maxSeq}.jsonl`);
+          try {
+            const lineCount = fs.readFileSync(candidate, 'utf8').split('\n').filter(l => l.trim() !== '').length;
+            if (lineCount < cap) { targetFile = candidate; append = true; }
+          } catch { /* 文件不可读则开新序号 */ }
+        }
+        if (!targetFile) targetFile = path.join(dir, `events-archive-${maxSeq + 1}.jsonl`);
+        const body = rows.map(r => JSON.stringify({
+          id: r.id, at: r.at, event: r.event,
+          taskId: r.taskId ?? null, owner: r.owner ?? null, detail: r.detail ?? null,
+        })).join('\n') + '\n';
+        if (append) fs.appendFileSync(targetFile, body, 'utf8');
+        else fs.writeFileSync(targetFile, body, 'utf8');
+
+        const lastId = rows[rows.length - 1].id;
+        this.#db.exec('BEGIN IMMEDIATE');
+        try {
+          this.#db.prepare('DELETE FROM events WHERE id <= ?').run(lastId);
+          const prev = Number(this.#db.prepare("SELECT value FROM meta WHERE key='eventsDroppedTotal'").get()?.value ?? 0);
+          this.#db.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)')
+            .run('eventsDroppedTotal', String(prev + rows.length));
+          this.#db.exec('COMMIT');
+        } catch (err) {
+          try { this.#db.exec('ROLLBACK'); } catch { /* ignore */ }
+          throw err;
+        }
+      } finally {
+        try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+      }
+    } catch { /* 静默：归档是治理不是依赖，任何失败都不阻断主写（事件仍安全在库内） */ }
+  }
+
+  /**
+   * 归档专用轻量锁：wx 原子创建 + 持锁进程存活探测（ESRCH 立即抢占）+ mtime 超龄抢占。
+   * 与 acquireOpenLock 的区别：等不到就放弃（返回 false）而不是长等——归档可推迟。
+   */
+  #tryArchiveLock(lockPath) {
+    const deadline = Date.now() + 1500;
+    for (;;) {
+      let fd = -1;
+      try {
+        fd = fs.openSync(lockPath, 'wx');
+        try { fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now(), host: os.hostname() })); } catch { /* ignore */ }
+        try { fs.closeSync(fd); } catch { /* ignore */ }
+        return true;
+      } catch (err) {
+        if (err?.code !== 'EEXIST') return false; // 创建失败（权限等）：放弃本轮
+        let stale = false;
+        try {
+          const info = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+          const pid = Number(info?.pid);
+          const sameHost = String(info?.host ?? '') === os.hostname();
+          if (Number.isFinite(pid) && pid > 0 && sameHost && pid !== process.pid) {
+            try { process.kill(pid, 0); } catch (e) { stale = e?.code === 'ESRCH'; }
+          }
+        } catch { /* 解析失败交给 mtime */ }
+        if (!stale) {
+          try { if (Date.now() - fs.statSync(lockPath).mtimeMs > 30000) stale = true; }
+          catch { /* 锁刚被释放，重试 */ }
+        }
+        if (stale) {
+          try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+          continue;
+        }
+        if (Date.now() >= deadline) return false;
+        try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); }
+        catch { const end = Date.now() + 50; while (Date.now() < end) { /* 忙等兜底 */ } }
+      }
+    }
   }
 
   /**
@@ -986,6 +1104,9 @@ export class Store {
       assertDepsResolvable(state, id, state.tasks[id].dependsOn, 'plan_create');
     }
     detectCycle(state);
+    // 审计起点：计划创建必须落「计划创建」事件（2.2.0 即有，3.0 重写时遗漏）——
+    // webhook 的 events:[本事务新增事件] 依赖它非空，事件流/看板也需要计划起点
+    state.log.push({ at: state.createdAt ?? new Date().toISOString(), event: '计划创建', detail: `${state.order.length} 个任务，目标：${goal}` });
     // 计划创建是「整体覆盖」语义：清库重建（取代 2.2.0 的整文件替换）
     const db = this.#db;
     try {
@@ -993,6 +1114,7 @@ export class Store {
       this.#persistSnapshot(db, state, { skipShapeCheck: true });
       db.exec('COMMIT');
       this.#notifyWebhook(this.rev(), 0);
+      this.#archiveEventsIfNeeded();
     } catch (err) {
       try { db.exec('ROLLBACK'); } catch { /* ignore */ }
       throw err;

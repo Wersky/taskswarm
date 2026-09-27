@@ -37,6 +37,10 @@
   fire-and-forget POST `{rev, events}`（2s 超时静默失败），弥补 MCP 拉取语义延迟。
 - **成本钩子**：`task_update` 新增可选 `cost:{tokens,minutes}` 累加字段，
   `board` 汇总全群 Σtokens / Σminutes。
+- **events 归档治理**：超过 `TASKSWARM_MAX_EVENTS`（默认 5000）的最旧事件自动
+  导出为 `任务蜂群/events-archive-<n>.jsonl`（装满一份再开新序号）后从库内删除，
+  `meta.eventsDroppedTotal` 记账——总数 = 库内现存 + 累计归档，数据一份不丢；
+  归档失败静默跳过，绝不阻断主写。
 
 ### Fixed
 

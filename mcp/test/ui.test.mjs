@@ -16,7 +16,10 @@ import { connect, makeWorkspace, rmWorkspace } from './helpers.mjs';
 const UI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'ui', 'server.mjs');
 
 function startUi(ws, port, reviewer) {
-  const child = spawn(process.execPath, [UI, '--workspace', ws, '--port', String(port), '--reviewer', reviewer], {
+  // reviewer 传空值时不携带 --reviewer：用于验证「启动未指定身份 → 审批被拒」
+  const argv = [UI, '--workspace', ws, '--port', String(port)];
+  if (reviewer) argv.push('--reviewer', reviewer);
+  const child = spawn(process.execPath, argv, {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
@@ -97,6 +100,7 @@ describe('Web 控制台 API', () => {
       await c.call('plan_create', { workspace: ws, goal: '控制台审核流', tasks: [
         { id: 't1', title: '实现', reviewer: 'boss' },
         { id: 't2', title: '收尾', dependsOn: ['t1'], reviewer: 'boss' },
+        { id: 't3', title: '外部审', reviewer: 'alice' },
       ] });
       await c.call('task_claim', { workspace: ws, taskId: 't1', owner: 'dev' });
       await c.call('task_update', { workspace: ws, taskId: 't1', status: 'done', note: '做完了', owner: 'dev' });
@@ -113,12 +117,9 @@ describe('Web 控制台 API', () => {
       assert.ok(detail.notes.some(n => n.note === '做完了'));
       assert.ok(detail.events.length >= 2);
 
-      // reviewer 不一致被拒（走同一核心校验）
-      const bad = await postJson(port, '/api/review', { taskId: 't1', verdict: 'approve', owner: 'intruder' });
-      assert.equal(bad.body.error !== undefined, true, '身份不符必须被拒');
-
-      // 正确身份 approve
-      const ok = await postJson(port, '/api/review', { taskId: 't1', verdict: 'approve' });
+      // 身份只认启动参数：body.owner 无论是什么（哪怕是冒充的 intruder）
+      // 都以 --reviewer（boss）身份提交——boss 与登记 reviewer 一致，裁决应成功
+      const ok = await postJson(port, '/api/review', { taskId: 't1', verdict: 'approve', owner: 'intruder' });
       assert.equal(ok.body.ok, true, JSON.stringify(ok.body));
       d = JSON.parse((await get(port, '/api/state')).body);
       assert.equal(d.tasks.find(t => t.id === 't1').status, 'done');
@@ -140,7 +141,37 @@ describe('Web 控制台 API', () => {
       const t2b = d.tasks.find(t => t.id === 't2');
       assert.equal(t2b.status, 'in_progress');
       assert.equal(t2b.reviewStage, 'rejected');
+
+      // 登记给 alice 的任务：body.owner 填什么都以启动身份 boss 提交，
+      // 裁决必须失败且错误指向身份不符（body.owner 冒充 alice 也不行）
+      await c.call('task_claim', { workspace: ws, taskId: 't3', owner: 'dev3' });
+      await c.call('task_update', { workspace: ws, taskId: 't3', status: 'done', owner: 'dev3' });
+      const alien = await postJson(port, '/api/review', { taskId: 't3', verdict: 'approve', owner: 'intruder' });
+      assert.equal(alien.status, 400);
+      assert.match(String(alien.body.error ?? ''), /无权裁决/, '错误应指向身份不符（boss ≠ 登记的 alice）');
+      d = JSON.parse((await get(port, '/api/state')).body);
+      assert.equal(d.tasks.find(t => t.id === 't3').status, 'pending_review', '被拒后应停在待审核');
     } finally { rmWorkspace(ws); if (ui) { ui.kill(); ui = null; } }
+  });
+
+  test('审批身份守卫：启动未提供 --reviewer 时审批一律 403（body.owner 无效）', async () => {
+    const ws = makeWorkspace('ui-noreviewer');
+    const port = PORT + 3;
+    let ui3;
+    try {
+      await c.call('plan_create', { workspace: ws, goal: '无身份控制台', tasks: [
+        { id: 'x', title: 'X', reviewer: 'alice' },
+      ] });
+      await c.call('task_claim', { workspace: ws, taskId: 'x', owner: 'dev' });
+      await c.call('task_update', { workspace: ws, taskId: 'x', status: 'done', owner: 'dev' });
+
+      ui3 = await startUi(ws, port, ''); // 不携带 --reviewer 启动
+      const r = await postJson(port, '/api/review', { taskId: 'x', verdict: 'approve', owner: 'intruder' });
+      assert.equal(r.status, 403, '未指定 --reviewer 必须整体拒绝审批');
+      assert.match(String(r.body.error ?? ''), /--reviewer/, '错误应指向需要 --reviewer 身份');
+      const d = JSON.parse((await get(port, '/api/state')).body);
+      assert.equal(d.tasks.find(t => t.id === 'x').status, 'pending_review', '任务不应被裁决');
+    } finally { rmWorkspace(ws); if (ui3) ui3.kill(); }
   });
 
   test('SSE /api/watch：连接即收到 hello，rev 变化推送 change', async () => {

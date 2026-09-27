@@ -34,11 +34,11 @@ function parseArgs(argv) {
 }
 const args = parseArgs(process.argv.slice(2));
 if (args.help || !args.workspace) {
-  console.log('用法：node ui/server.mjs --workspace <项目目录> [--reviewer <审核者身份>] [--port 7788] [--host 127.0.0.1]');
+  console.log('用法：node ui/server.mjs --workspace <项目目录> --reviewer <审核者身份>（审批必需） [--port 7788] [--host 127.0.0.1]');
   process.exit(args.help ? 0 : 1);
 }
 if (!args.reviewer) {
-  console.log('提示：未提供 --reviewer，审批按钮将以「console-reviewer」身份提交（需与任务登记的 reviewer 一致才能通过校验）。');
+  console.log('提示：未提供 --reviewer，审批接口将拒绝所有审批请求（403）。需要审批时请以 --reviewer <审核者身份> 重启控制台。');
 }
 
 let store;
@@ -82,6 +82,11 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && p === '/api/review') {
     let body = '';
     for await (const chunk of req) body += chunk;
+    // 审批身份只认启动参数：body.owner 一律忽略。若信任请求体，本机任意进程
+    // 都能填个 reviewer 身份冒充审批人，审核门等于形同虚设。
+    if (!args.reviewer) {
+      return json(res, 403, { error: '/api/review: 控制台启动时未提供 --reviewer，无法确定审批身份，审批被拒绝。下一步：以 --reviewer <审核者身份> 重启控制台（身份须与任务登记的 reviewer 一致）。' });
+    }
     let input;
     try { input = JSON.parse(body || '{}'); } catch { return json(res, 400, { error: '请求体不是合法 JSON' }); }
     const verdict = String(input.verdict ?? '').trim().toLowerCase();
@@ -96,7 +101,8 @@ async function handleApi(req, res, url) {
         taskId: String(input.taskId ?? ''),
         verdict,
         ...(verdict === 'reject' ? { reason: String(input.reason ?? '').trim() } : {}),
-        owner: String(input.owner ?? args.reviewer ?? 'console-reviewer'),
+        // 身份取启动参数 args.reviewer；body.owner 一律忽略（防止请求体冒充审批人）
+        owner: args.reviewer,
       });
       return json(res, 200, { rev: r.rev, ...r.result });
     } catch (err) {
@@ -149,6 +155,8 @@ header h1 { font-size:16px; color:var(--accent); white-space:nowrap; }
 .card .id { color:var(--dim); font-size:12px; margin-right:6px; }
 .card .t { font-weight:600; }
 .card .meta { font-size:12px; color:var(--dim); margin-top:2px; }
+.card .parent-tag { color:var(--dim); opacity:.85; }
+.card { transition:margin-left .15s; }
 .card .note { font-size:12px; color:var(--dim); margin-top:4px; border-top:1px dashed var(--line); padding-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .st-pending { border-left-color:#90a4ae; } .st-claimed,.st-in_progress { border-left-color:var(--accent); }
 .st-pending_review { border-left-color:var(--review); } .st-done { border-left-color:var(--ok); opacity:.75; }
@@ -215,9 +223,14 @@ function render(d){
     var el = document.createElement('div'); el.className='lane';
     var h = '<h2>' + esc(lane.name) + ' <span class="n">' + tasks.length + '</span></h2>';
     tasks.forEach(function(t){
-      h += '<div class="card st-' + esc(t.status) + '" onclick="openTask(\\'' + esc(t.id) + '\\')">'
+      // 任务树层级：按 depth 缩进 + 「└ 属于」标记——泳道内父子关系一眼可见。
+      // depth 数据来自 /api/state 的 tasks[].depth（boardTasks 已返回），纯 CSS 缩进不引入库。
+      var indent = Math.min(t.depth || 0, 6) * 14;
+      h += '<div class="card st-' + esc(t.status) + '" style="margin-left:' + indent + 'px"'
+        + ' onclick="openTask(\\'' + esc(t.id) + '\\')">'
         + '<span class="id">[' + esc(t.id) + ']</span><span class="t">' + esc(t.title) + '</span>'
         + '<div class="meta">'
+        + (t.parent ? '<span class="parent-tag">└ 属于 ' + esc(t.parent) + '</span> ' : '')
         + (t.owner ? '@' + esc(t.owner) : '')
         + (t.assignee ? ' → 建议:' + esc(t.assignee) : '')
         + (t.reviewer && t.reviewStage==='pending' ? ' ⏳ 待 ' + esc(t.reviewer) + ' 审核' : '')
@@ -282,7 +295,8 @@ function review(verdict){
   var btns = document.querySelectorAll('#reviewBox button');
   btns.forEach(function(b){ b.disabled = true; });
   fetch('/api/review', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ taskId: CURRENT, verdict: verdict, reason: reason, owner: REVIEWER }) })
+    // 身份由服务端按启动参数 --reviewer 决定；body 里传 owner 也不会被采纳
+    body: JSON.stringify({ taskId: CURRENT, verdict: verdict, reason: reason }) })
     .then(function(r){ return r.json(); })
     .then(function(d){
       var m = document.getElementById('msg');
@@ -301,7 +315,7 @@ es.addEventListener('open', function(){ connState(true); });
 es.addEventListener('change', function(){ refresh(); });
 es.addEventListener('error', function(){ connState(false); });
 fetch('/api/state').then(function(r){ return r.json(); }).then(function(d){
-  REVIEWER = d.reviewer || 'console-reviewer';
+  REVIEWER = d.reviewer || '（未指定 --reviewer）';
   render(d);
 });
 </script>
@@ -339,6 +353,6 @@ const server = http.createServer((req, res) => {
 server.listen(args.port, args.host, () => {
   console.log(`任务蜂群控制台已启动：http://${args.host}:${args.port}`);
   console.log(`  工作区：${store.dbPath}`);
-  console.log(`  审批身份：${args.reviewer || 'console-reviewer'}`);
+  console.log(`  审批身份：${args.reviewer || '未指定（审批请求将被拒绝，重启时加 --reviewer）'}`);
   if (args.host !== '127.0.0.1') console.log('  ⚠️ 正在监听非回环地址——控制台无鉴权，请勿暴露到不受信任的网络。');
 });
