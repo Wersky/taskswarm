@@ -4,10 +4,10 @@
 
 [English](README.en.md) | 中文
 
-[![tests](https://img.shields.io/badge/tests-149%20passed-brightgreen)](#测试与可靠性)
-[![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2088.6%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2095.1%25-brightgreen)](#测试与可靠性)
+[![tests](https://img.shields.io/badge/tests-166%20passed-brightgreen)](#测试与可靠性)
+[![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2085.6%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2096.4%25-brightgreen)](#测试与可靠性)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#工程要点)
-[![node](https://img.shields.io/badge/node-%3E%3D18-blue)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D23.4-blue)](https://nodejs.org)
 
 ---
 
@@ -29,7 +29,7 @@
 能力比 ZCode 版更强（看板从"唯一通道"降级为"公共黑板 + 持久化事实源"）。
 
 > **验证边界（不夸大）**：三个宿主里，**只有 ZCode 是端到端跑过真实蜂群的**（本插件诞生于此，
-> 149 个测试全部跑在该路径上）。dsh 验证到"MCP 链路 + 11 工具 + 依赖守卫"这一层（以
+> 166 个测试全部跑在该路径上）。dsh 验证到"MCP 链路 + 11 工具 + 依赖守卫"这一层（以
 > `dsh-mcp-client` 相同的方式逐步驱动）；Codex 验证到"MCP 挂载成功"。**两边的"模型驱动完整蜂群"
 > 都还没跑过**——测试当日所有可用中转 key 余额不足。Codex 另有一项版本相关风险：
 > 子代理能否继承父会话的 MCP 工具随版本变化，需自行验证。详见各 `adapters/` 文档的实测记录表。
@@ -90,10 +90,11 @@ TaskSwarm 让主代理把目标拆成**任务树**，把互不依赖的部分**�
 
 ## 安装
 
-需要 **Node.js ≥ 18**，零第三方依赖。
+需要 **Node.js ≥ 23.4**（内置 `node:sqlite`），零第三方依赖。
 
 ```bash
 git clone https://github.com/Wersky/taskswarm.git
+npm link   # 可选：把 taskswarm（CLI）/ taskswarm-mcp（MCP server）挂进 PATH
 ```
 
 ### ZCode
@@ -201,6 +202,25 @@ node ui/server.mjs --workspace <项目目录> --reviewer <审核者身份> [--po
 - SSE 实时刷新，零构建（内嵌单页原生 JS），默认只监听 `127.0.0.1`（无鉴权，勿暴露公网）；
 - 可选 `TASKSWARM_WEBHOOK_URL`：每次写事务 POST `{rev, events}` 给外部集成。
 
+## CLI（3.1 新增）
+
+没有 MCP 宿主的场合（cron、CI、shell 管道、不支持 MCP 的工具），用命令行直接驱动同一个状态库：
+
+```bash
+node cli/taskswarm.mjs plan-create --goal "重构登录" --tasks-file tasks.json   # 建任务树
+node cli/taskswarm.mjs ready                              # 查可派发任务
+node cli/taskswarm.mjs claim T1 --owner agent-1            # 原子领取（返回体含上游笔记）
+node cli/taskswarm.mjs update T1 --status done --owner agent-1 --note "收工" --cost-tokens 4200
+node cli/taskswarm.mjs review T2 --verdict approve --owner reviewer-1       # PPR 裁决
+node cli/taskswarm.mjs board                              # 共享看板 + 成本汇总
+node cli/taskswarm.mjs serve --workspace . --reviewer reviewer-1            # 一键拉起 Web 控制台
+```
+
+- **与 MCP server 完全同层**：同一个 `core.mjs`、同一个 SQLite 状态库、同一套状态机守卫——CLI 写入与 MCP 写入互相可见，PPR 审核门在 CLI 下同样生效；
+- 成功输出 JSON 到 stdout，失败输出 `{"error":...}` 到 stderr 并退出 1，方便脚本分支；写操作前同样触发失联任务惰性回收；
+- 任务数组文件收纯数组或整个 `{goal, tasks}` 对象，`-` 表示 stdin；
+- 全部命令支持 `--workspace <目录>`（缺省 = 当前目录）；`npm link` 后可直接 `taskswarm <命令>`。
+
 ## MCP 工具
 
 | 工具 | 调用方 | 作用 |
@@ -218,18 +238,18 @@ node ui/server.mjs --workspace <项目目录> --reviewer <审核者身份> [--po
 
 > 真实工具名前缀是 `mcp__plugin_taskswarm_taskswarm__`，例如 `mcp__plugin_taskswarm_taskswarm__task_claim`。
 
-**所有调用都要显式传 `workspace`**（工作区绝对路径）——省略时会落到 server 进程的 cwd，而不是你以为的地方。这条行为有测试锁定（`lock-failure.test.mjs` 的「省略 workspace 时回退到进程 cwd」）。
+**所有调用都要显式传 `workspace`**（工作区绝对路径）——省略时会落到 server 进程的 cwd，而不是你以为的地方。这条行为有测试锁定（`storage-failure.test.mjs` 的「省略 workspace 时回退到进程 cwd」）。
 
 ## 测试与可靠性
 
-**149 个测试，全部通过；行覆盖 88.6%，函数覆盖 95.1%**（3.0 起 core/server/ui 三文件共约 1460 行，绝对覆盖行数 1293 —— 未覆盖部分集中在防御性错误分支与极端锁竞争路径）。
+**166 个测试，全部通过；行覆盖 85.6%，函数覆盖 96.4%**（口径为 cli/core/server 三文件共 1783 行，绝对覆盖行数 1527 —— 未覆盖部分集中在防御性错误分支、usage 帮助文本与极端锁竞争路径。`ui/server.mjs` 的控制台链路由 ui 测试真实覆盖，但 Windows 下测试以 TerminateProcess 结束子进程、V8 覆盖率数据无法落盘，故不计入本表——这是平台语义，不是未测试）。
 
 ```bash
-npm test          # 149 tests, 0 fail
-npm run coverage  # 行覆盖 88.6% (1293/1460) · 函数覆盖 95.1% (135/142)
+npm test          # 166 tests, 0 fail
+npm run coverage  # 行覆盖 85.6% (1527/1783) · 函数覆盖 96.4% (163/169)
 ```
 
-要求 Node ≥ 18，无任何测试框架依赖（用内置 `node:test` + `node:assert/strict`）。
+要求 Node ≥ 23.4（内置 `node:sqlite`），无任何测试框架依赖（用内置 `node:test` + `node:assert/strict`）。
 
 ### 测试为什么全部走子进程
 

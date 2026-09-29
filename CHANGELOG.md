@@ -5,6 +5,30 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [3.1.0] - 2026-09-29
+
+商业化路线 v3.0 收尾：给没有 MCP 宿主的场合一个入口（CLI），并修正包元数据。
+
+### Added
+
+- **CLI**（`cli/taskswarm.mjs`）：12 个子命令与 MCP 工具一一对应（`plan` / `plan-create` /
+  `plan-reset` / `ready` / `claim` / `update` / `add` / `notes` / `review` / `board` /
+  `state` / `serve`）。与 MCP server 完全同层——同一个 core、同一个 SQLite 状态库、
+  同一套状态机守卫与惰性回收；成功输出 JSON（stdout），失败输出 `{"error":...}`（stderr）
+  并退出 1。任务数组文件收纯数组或整个 `{goal, tasks}` 对象，`-` 表示 stdin。
+  10 个子进程级测试锁定（含 PPR 审核门经 CLI 生效、控制台 403 冒充防护）。
+- `serve` 子命令一键拉起 Web 控制台（参数透传）。
+- 控制台优雅退出：SIGTERM/SIGINT 先关监听与 SQLite 句柄（POSIX 下 Ctrl+C 干净退出）。
+
+### Changed
+
+- `package.json`：新增 `bin.taskswarm`；`files` 补齐 `cli/` 与 `ui/`（此前 npm 包不含
+  CLI 与控制台）；`engines` 修正为 `>=23.4`（3.0 起依赖内置 `node:sqlite`，`>=18` 是错的）。
+- 版本四处对齐 3.1.0（core `SERVER_VERSION` / `package.json` / `plugin.json` / `marketplace.json`）。
+- README（中/英）测试与覆盖率数字更新至 166 / 85.6% / 96.4%，并如实标注 ui 覆盖率
+  因 Windows TerminateProcess 语义无法采集（平台语义，非未测试）；修正引用失效的
+  `lock-failure.test.mjs` 为 `storage-failure.test.mjs`；英文版补 3.0 控制台章节。
+
 ## [3.0.0] - 2026-09-25
 
 「产品版」：从单机插件升级为可对外交付的协作工具——可靠存储、可观测、有界面。

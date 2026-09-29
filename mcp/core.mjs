@@ -21,7 +21,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import http from 'node:http';
 
-export const SERVER_VERSION = '3.0.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
+export const SERVER_VERSION = '3.1.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
 
 // ---------------------------------------------------------------------------
 // 落盘位置：<工作区>/任务蜂群/swarm-state.db（由调用方传 workspace，默认 cwd）

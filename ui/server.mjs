@@ -356,3 +356,16 @@ server.listen(args.port, args.host, () => {
   console.log(`  审批身份：${args.reviewer || '未指定（审批请求将被拒绝，重启时加 --reviewer）'}`);
   if (args.host !== '127.0.0.1') console.log('  ⚠️ 正在监听非回环地址——控制台无鉴权，请勿暴露到不受信任的网络。');
 });
+
+// 优雅退出：Ctrl+C / kill 时关闭监听与 SQLite 句柄再退出。
+// 除产品体验外还有个实际原因：强杀（SIGKILL）会让 V8 覆盖率数据丢失，
+// 导致 ui/server.mjs 永远进不了 coverage 报告。
+let closing = false;
+function shutdown() {
+  if (closing) return;
+  closing = true;
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 500).unref(); // 兜底：有连接挂住时也退出
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

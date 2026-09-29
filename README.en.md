@@ -4,10 +4,10 @@
 
 [中文](README.md) | English
 
-[![tests](https://img.shields.io/badge/tests-123%20passed-brightgreen)](#testing--reliability)
-[![coverage](https://img.shields.io/badge/coverage-lines%2088.6%25%20%C2%B7%20functions%2095.1%25-brightgreen)](#testing--reliability)
+[![tests](https://img.shields.io/badge/tests-166%20passed-brightgreen)](#testing--reliability)
+[![coverage](https://img.shields.io/badge/coverage-lines%2085.6%25%20%C2%B7%20functions%2096.4%25-brightgreen)](#testing--reliability)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#engineering-notes)
-[![node](https://img.shields.io/badge/node-%3E%3D18-blue)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D23.4-blue)](https://nodejs.org)
 
 ---
 
@@ -84,7 +84,7 @@ The architecture is **"MCP supplies deterministic capability + SKILL.md supplies
 
 ## Install
 
-Requires **Node.js ≥ 18** and zero third-party dependencies.
+Requires **Node.js ≥ 23.4** (built-in `node:sqlite`) and zero third-party dependencies.
 
 ```bash
 git clone https://github.com/Wersky/taskswarm.git
@@ -180,6 +180,36 @@ The review gate governs *whether output is acceptable*; the proposal loop govern
 - **Rejection adopts nothing**: `reject` **ignores `proposals` entirely**; a rejection cannot smuggle in new tasks.
 - **Adoption is atomic**: if any item is invalid (missing `title`, illegal `role`, nonexistent dependency), the whole batch is dropped and the tree is left untouched.
 
+## Web Console (3.0) & CLI (3.1)
+
+The human side gets a web console sharing the same state store and the same review function as the MCP server — **console approvals never bypass the state machine**:
+
+```bash
+node ui/server.mjs --workspace <dir> --reviewer <identity> [--port 7788]
+```
+
+- Swimlane board (pending / in progress / pending review / done / failed-skipped); click a task for full notes and the event stream;
+- **Approve or reject directly on the page** (rejection requires a reason, written into the task notes);
+- Live SSE refresh, zero build (embedded single-page vanilla JS), listens on `127.0.0.1` only (no auth — do not expose);
+- Optional `TASKSWARM_WEBHOOK_URL`: every write transaction POSTs `{rev, events}` to external integrations.
+
+Where no MCP host is available (cron, CI, shell pipelines, tools without MCP), the CLI drives the same state store:
+
+```bash
+node cli/taskswarm.mjs plan-create --goal "Refactor login" --tasks-file tasks.json
+node cli/taskswarm.mjs ready
+node cli/taskswarm.mjs claim T1 --owner agent-1
+node cli/taskswarm.mjs update T1 --status done --owner agent-1 --note "done" --cost-tokens 4200
+node cli/taskswarm.mjs review T2 --verdict approve --owner reviewer-1
+node cli/taskswarm.mjs board
+node cli/taskswarm.mjs serve --workspace . --reviewer reviewer-1   # launches the web console
+```
+
+- **Same layer as the MCP server**: one `core.mjs`, one SQLite store, one set of state-machine guards — CLI writes and MCP writes see each other; the PPR gate works identically;
+- Success prints JSON to stdout; failure prints `{"error":...}` to stderr and exits 1;
+- The tasks file accepts a bare array or the whole `{goal, tasks}` object; `-` means stdin;
+- All commands accept `--workspace <dir>` (default: cwd); after `npm link`, just `taskswarm <command>`.
+
 ## MCP Tools
 
 | Tool | Caller | Purpose |
@@ -197,18 +227,18 @@ The review gate governs *whether output is acceptable*; the proposal loop govern
 
 > The real tool prefix is `mcp__plugin_taskswarm_taskswarm__` on ZCode, for example `mcp__plugin_taskswarm_taskswarm__task_claim`. On dsh and Codex it is `mcp__taskswarm__`.
 
-**Every call must pass `workspace` explicitly** (the absolute workspace path) — omit it and state lands in the server process's cwd, not where you think. This behavior is locked by a test (the "falls back to process cwd when workspace is omitted" case in `lock-failure.test.mjs`).
+**Every call must pass `workspace` explicitly** (the absolute workspace path) — omit it and state lands in the server process's cwd, not where you think. This behavior is locked by a test (the "falls back to process cwd when workspace is omitted" case in `storage-failure.test.mjs`).
 
 ## Testing & Reliability
 
-**149 tests, all passing; 88.6% line coverage, 95.1% function coverage** across ~1,460 lines (core / protocol / console); uncovered lines are mostly defensive error branches.
+**166 tests, all passing; 85.6% line coverage, 96.4% function coverage** across 1,783 lines (cli / core / protocol, 1,527 lines covered — the uncovered remainder is defensive error branches, usage text and extreme lock-contention paths). The console (`ui/server.mjs`) is exercised end-to-end by the ui tests, but on Windows the test runner terminates child processes with TerminateProcess, so V8 coverage data never flushes — the console is therefore not part of the table. That is platform semantics, not missing tests.
 
 ```bash
-npm test          # 149 tests, 0 fail
-npm run coverage  # 88.6% lines (1293/1460) · 95.1% functions (135/142)
+npm test          # 166 tests, 0 fail
+npm run coverage  # 85.6% lines (1527/1783) · 96.4% functions (163/169)
 ```
 
-Requires Node ≥ 18, with no test-framework dependency (uses built-in `node:test` + `node:assert/strict`).
+Requires Node ≥ 23.4 (built-in `node:sqlite`), with no test-framework dependency (uses built-in `node:test` + `node:assert/strict`).
 
 ### Why every test drives a subprocess
 

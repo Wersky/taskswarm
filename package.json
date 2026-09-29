@@ -1,7 +1,7 @@
 {
   "name": "taskswarm",
-  "version": "3.0.0",
-  "description": "TaskSwarm: recursive task decomposition, wave-based parallel subagent dispatch, and a shared MCP progress board. Zero dependencies, Node >= 18. Includes a PPR review gate: a task with a reviewer stays blocked (downstream cannot start) until the reviewer approves.",
+  "version": "3.1.0",
+  "description": "TaskSwarm: recursive task decomposition, wave-based parallel subagent dispatch, and a shared MCP progress board. Zero dependencies, Node >= 23.4. Ships a CLI (cli/taskswarm.mjs) for non-MCP hosts and terminals, plus a PPR review gate: a task with a reviewer stays blocked until the reviewer approves.",
   "type": "module",
   "license": "MIT",
   "author": {
@@ -27,10 +27,11 @@
     "任务蜂群"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=23.4"
   },
   "main": "mcp/server.mjs",
   "bin": {
+    "taskswarm": "cli/taskswarm.mjs",
     "taskswarm-mcp": "mcp/server.mjs"
   },
   "files": [
@@ -38,7 +39,9 @@
     "commands",
     "mcp",
     "scripts",
-    "skills"
+    "skills",
+    "cli",
+    "ui"
   ],
   "scripts": {
     "test": "node --test \"mcp/test/**/*.test.mjs\"",
