@@ -79,9 +79,12 @@ function usage() {
       [--force] [--proposals-file <proposals.json>]
   state save --file <state.json>      导入完整状态快照（会话恢复）
   state clear                         清空（= plan-reset）
+  audit [--format jsonl|json] [--file <导出路径>]
+                                      审计导出：归档 + 库内全部事件的完整时间线
+                                      （默认 jsonl 到 stdout；json 含计数与 sha256）
 
 其他：
-  serve [--port 7788] [--reviewer <身份>] [--workspace <目录>]
+  serve [--port 7788] [--reviewer <身份>] [--workspace <目录>] [--token <访问令牌>]
                                       启动 Web 控制台（与 MCP 共享同一状态库）
   --version | help                    版本 / 本帮助
 
@@ -253,6 +256,12 @@ const COMMANDS = {
     fail('state 子命令必须是 save / load / clear 之一');
     return null;
   },
+  audit: () => {
+    const format = optString(flags, '--format') ?? 'jsonl';
+    if (format !== 'jsonl' && format !== 'json') fail('--format 必须是 jsonl 或 json');
+    const file = optString(flags, '--file');
+    return { method: 'auditExport', args, format, file };
+  },
   serve: () => {
     // 控制台独立进程：与 MCP/CLI 共享同一状态库；审批身份必须显式给
     const uiPath = path.join(CLI_ROOT, 'ui', 'server.mjs');
@@ -261,6 +270,8 @@ const COMMANDS = {
     if (port !== undefined) pass.push('--port', String(port));
     const reviewer = optString(flags, '--reviewer');
     if (reviewer !== undefined) pass.push('--reviewer', reviewer);
+    const token = optString(flags, '--token');
+    if (token !== undefined) pass.push('--token', token);
     const child = execFile(process.execPath, [uiPath, ...pass], { stdio: 'inherit' });
     child.on('exit', (code) => process.exit(code ?? 0));
     return null;
@@ -275,6 +286,22 @@ if (invocation) {
   try {
     const store = Store.for(invocation.args);
     store.reclaimStale(); // 与 MCP server 相同的惰性回收触发点
+    // audit：auditExport 返回裸导出对象（无 rev 包装），jsonl 模式输出纯事件流不混 meta
+    if (command === 'audit') {
+      const export_ = store.auditExport();
+      if (invocation.format === 'jsonl') {
+        const body = export_.events.map(e => JSON.stringify(e)).join('\n') + (export_.events.length ? '\n' : '');
+        if (invocation.file) {
+          fs.writeFileSync(invocation.file, body);
+          process.stderr.write(JSON.stringify({ ok: true, file: invocation.file, exported: export_.exported, sha256: export_.sha256 }, null, 2) + '\n');
+        } else {
+          process.stdout.write(body);
+        }
+      } else {
+        process.stdout.write(JSON.stringify(export_, null, 2) + '\n');
+      }
+      process.exit(0);
+    }
     const { result, rev } = store[invocation.method](invocation.args) ?? {};
     const payload = (result && typeof result === 'object' && !Array.isArray(result))
       ? { rev, ...result }

@@ -18,10 +18,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import http from 'node:http';
 
-export const SERVER_VERSION = '3.1.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
+export const SERVER_VERSION = '4.0.0'; // 必须与 package.json / .zcode-plugin/plugin.json 一致
 
 // ---------------------------------------------------------------------------
 // 落盘位置：<工作区>/任务蜂群/swarm-state.db（由调用方传 workspace，默认 cwd）
@@ -1588,6 +1589,53 @@ export class Store {
     const snapshot = { ...s, log: allEvents };
     delete snapshot.rev; // rev 是库内实现细节，不进快照
     return { result: { exists: true, state: snapshot }, rev: s.rev };
+  }
+
+  /**
+   * 审计导出（4.0 企业版）：完整事件时间线 = 已归档文件（events-archive-*.jsonl，
+   * 按序号在前）+ 库内 events 表现存部分。附计数与对全部导出事件规范 JSONL 的
+   * sha256（校验导出件完整性用——这是导出摘要，不是防篡改链；库内防篡改依赖
+   * 文件系统权限与「事件只追加」的写入纪律）。
+   */
+  auditExport() {
+    const dir = path.dirname(this.dbPath);
+    const archiveNames = (() => {
+      try {
+        return fs.readdirSync(dir)
+          .filter(n => /^events-archive-\d+\.jsonl$/.test(n))
+          .sort((a, b) => Number(/^events-archive-(\d+)\.jsonl$/.exec(a)[1]) - Number(/^events-archive-(\d+)\.jsonl$/.exec(b)[1]));
+      } catch { return []; }
+    })();
+    const archived = [];
+    let malformedArchiveLines = 0;
+    for (const name of archiveNames) {
+      for (const line of fs.readFileSync(path.join(dir, name), 'utf8').split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        try { archived.push(JSON.parse(t)); } catch { malformedArchiveLines++; }
+      }
+    }
+    let live = [];
+    let eventsDroppedTotal = 0;
+    if (!this.#broken && this.#db) {
+      live = this.#db.prepare('SELECT at,event,taskId,owner,detail FROM events ORDER BY id ASC').all()
+        .map(r => ({ at: r.at, event: r.event, ...(r.taskId ? { taskId: r.taskId } : {}), ...(r.owner ? { owner: r.owner } : {}), ...(r.detail ? { detail: r.detail } : {}) }));
+      eventsDroppedTotal = Number(this.#db.prepare("SELECT value FROM meta WHERE key='eventsDroppedTotal'").get()?.value ?? 0);
+    }
+    const all = [...archived, ...live];
+    const sha256 = crypto.createHash('sha256').update(all.map(e => JSON.stringify(e)).join('\n')).digest('hex');
+    return {
+      workspace: this.dbPath,
+      exportedAt: new Date().toISOString(),
+      archives: archiveNames,
+      archivedCount: archived.length,
+      liveCount: live.length,
+      exported: all.length,
+      eventsDroppedTotal,
+      ...(malformedArchiveLines > 0 ? { malformedArchiveLines } : {}),
+      sha256,
+      events: all,
+    };
   }
 
   /**

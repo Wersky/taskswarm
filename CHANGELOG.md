@@ -5,6 +5,34 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.0.0] - 2026-09-29
+
+商业化路线 v4.0「企业版」第一段落：访问控制与审计——「凌晨两点出事时能查清、能追责」的那部分。
+
+### Added
+
+- **控制台访问令牌**（opt-in）：`--token <secret>` 或环境变量 `TASKSWARM_CONSOLE_TOKEN`。
+  配置后所有路由（静态页、`/api/*`、SSE 实时流）统一过认证门——请求头
+  `Authorization: Bearer <t>` 或 URL `?token=<t>`（EventSource 无法带 header，只能走 query）。
+  令牌对比先 sha256 归一再 `crypto.timingSafeEqual`，无长度泄露与时序侧信道。
+  **不配置令牌时行为与 3.x 完全一致**（3 个测试锁定向后兼容）。控制台自此可安全
+  暴露到团队内网/VPC。
+- **审计导出**：core 新增 `auditExport()`——完整事件时间线 = 历史归档文件
+  （`events-archive-*.jsonl` 按序号在前）+ 库内 `events` 表现存部分，附
+  `archivedCount / liveCount / exported / eventsDroppedTotal` 计数与对全部导出事件
+  规范 JSONL 的 sha256（导出完整性摘要，非防篡改链）。入口：
+  - CLI `taskswarm audit [--format jsonl|json] [--file <路径>]`——默认 JSONL 到 stdout
+    （纯事件流，管道友好，不混 meta）；`--file` 落文件、摘要走 stderr；
+  - 控制台 `GET /api/export`（受访问令牌保护）。
+- 6 个企业版测试（令牌 3 + 审计 3），全量 172 绿。
+
+### Changed
+
+- 版本四处对齐 4.0.0（core `SERVER_VERSION` / `package.json` / `plugin.json` / `marketplace.json`）。
+- README（中/英）新增「企业版能力」章节：令牌认证、审计导出、多租户口径
+  （租户边界 = 工作区边界，每 workspace 一份独立 SQLite 库，结构上不存在跨租户查询路径）
+  与部署形态（on-prem 天生满足）。
+
 ## [3.1.0] - 2026-09-29
 
 商业化路线 v3.0 收尾：给没有 MCP 宿主的场合一个入口（CLI），并修正包元数据。

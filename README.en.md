@@ -4,8 +4,8 @@
 
 [中文](README.md) | English
 
-[![tests](https://img.shields.io/badge/tests-166%20passed-brightgreen)](#testing--reliability)
-[![coverage](https://img.shields.io/badge/coverage-lines%2085.6%25%20%C2%B7%20functions%2096.4%25-brightgreen)](#testing--reliability)
+[![tests](https://img.shields.io/badge/tests-172%20passed-brightgreen)](#testing--reliability)
+[![coverage](https://img.shields.io/badge/coverage-lines%2085.0%25%20%C2%B7%20functions%2096.0%25-brightgreen)](#testing--reliability)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#engineering-notes)
 [![node](https://img.shields.io/badge/node-%3E%3D23.4-blue)](https://nodejs.org)
 
@@ -210,6 +210,42 @@ node cli/taskswarm.mjs serve --workspace . --reviewer reviewer-1   # launches th
 - The tasks file accepts a bare array or the whole `{goal, tasks}` object; `-` means stdin;
 - All commands accept `--workspace <dir>` (default: cwd); after `npm link`, just `taskswarm <command>`.
 
+## Enterprise Capabilities (4.0)
+
+Access control and audit — the "at 2 a.m. you can find out, recover, and hold accountable" part.
+
+### Console access token (opt-in)
+
+```bash
+node ui/server.mjs --workspace <dir> --reviewer <identity> --token <secret>
+# or environment variable: TASKSWARM_CONSOLE_TOKEN
+```
+
+- When set, **every route** (static page, `/api/*`, the SSE stream) passes the auth gate: header `Authorization: Bearer <t>` or URL `?token=<t>` (the page transparently forwards it to its fetch/SSE calls);
+- Tokens are compared sha256-normalized via `crypto.timingSafeEqual` — no length leak, no timing side channel;
+- **Without a token, behavior is identical to 3.x** (loopback use; locked by tests). With one, the console is safe to expose to a team intranet / VPC;
+- The reviewer identity (`--reviewer`) and the access token (`--token`) are two independent gates: who decides, vs. who gets in.
+
+### Audit export
+
+One command exports the complete event timeline — archived events (`events-archive-*.jsonl`, in sequence order first) plus the live `events` table, with counts and a sha256 digest of the exported stream:
+
+```bash
+node cli/taskswarm.mjs audit                      # JSONL to stdout (pure event stream)
+node cli/taskswarm.mjs audit --format json        # full object with counts + sha256
+node cli/taskswarm.mjs audit --format jsonl --file audit.jsonl   # write file, summary on stderr
+curl -H 'Authorization: Bearer <token>' http://127.0.0.1:7788/api/export   # console route (token-gated)
+```
+
+- The `events` table is append-only (overflow is archived to JSONL files with `eventsDroppedTotal` accounting) — export = archives + live, totals conserved;
+- The sha256 is an **export integrity digest** (verify nothing was lost or corrupted in transit/archival), not a tamper-proof chain — in-store tamper resistance relies on filesystem permissions and the append-only write discipline.
+
+### Multi-tenancy & deployment (stated plainly)
+
+- **Tenant boundary = workspace boundary**: each workspace gets its own SQLite store (`<workspace>/任务蜂群/`); there is structurally no cross-workspace query path — isolation is physical, not query filtering;
+- **On-prem by nature**: zero dependencies, single db file, data never leaves the machine — the full feature set works without any SaaS (the opposite trade-off from the LangGraph-style platforms: we sell data ownership, not rent it out);
+- Not built yet (add on customer demand): multi-tenant gateway, SSO/LDAP, quota billing, SLA — the current shape targets "self-hosted coordination layer for team intranets".
+
 ## MCP Tools
 
 | Tool | Caller | Purpose |
@@ -231,11 +267,11 @@ node cli/taskswarm.mjs serve --workspace . --reviewer reviewer-1   # launches th
 
 ## Testing & Reliability
 
-**166 tests, all passing; 85.6% line coverage, 96.4% function coverage** across 1,783 lines (cli / core / protocol, 1,527 lines covered — the uncovered remainder is defensive error branches, usage text and extreme lock-contention paths). The console (`ui/server.mjs`) is exercised end-to-end by the ui tests, but on Windows the test runner terminates child processes with TerminateProcess, so V8 coverage data never flushes — the console is therefore not part of the table. That is platform semantics, not missing tests.
+**172 tests, all passing; 85.0% line coverage, 96.0% function coverage** across 1,849 lines (cli / core / protocol, 1,572 lines covered — the uncovered remainder is defensive error branches, usage text and extreme lock-contention paths). The console (`ui/server.mjs`) is exercised end-to-end by the ui/enterprise tests, but on Windows the test runner terminates child processes with TerminateProcess, so V8 coverage data never flushes — the console is therefore not part of the table. That is platform semantics, not missing tests.
 
 ```bash
-npm test          # 166 tests, 0 fail
-npm run coverage  # 85.6% lines (1527/1783) · 96.4% functions (163/169)
+npm test          # 172 tests, 0 fail
+npm run coverage  # 85.0% lines (1572/1849) · 96.0% functions (170/177)
 ```
 
 Requires Node ≥ 23.4 (built-in `node:sqlite`), with no test-framework dependency (uses built-in `node:test` + `node:assert/strict`).

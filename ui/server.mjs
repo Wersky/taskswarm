@@ -15,26 +15,28 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { Store } from '../mcp/core.mjs';
 
 // ---------------------------------------------------------------------------
 // 参数解析（手工解析，保持零依赖）
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const out = { port: 7788, host: '127.0.0.1', workspace: '', reviewer: '' };
+  const out = { port: 7788, host: '127.0.0.1', workspace: '', reviewer: '', token: '' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port') out.port = Number(argv[++i]);
     else if (a === '--host') out.host = String(argv[++i]);
     else if (a === '--workspace') out.workspace = String(argv[++i]);
     else if (a === '--reviewer') out.reviewer = String(argv[++i]);
+    else if (a === '--token') out.token = String(argv[++i]);
     else if (a === '--help' || a === '-h') out.help = true;
   }
   return out;
 }
 const args = parseArgs(process.argv.slice(2));
 if (args.help || !args.workspace) {
-  console.log('用法：node ui/server.mjs --workspace <项目目录> --reviewer <审核者身份>（审批必需） [--port 7788] [--host 127.0.0.1]');
+  console.log('用法：node ui/server.mjs --workspace <项目目录> --reviewer <审核者身份>（审批必需） [--port 7788] [--host 127.0.0.1] [--token <访问令牌>]');
   process.exit(args.help ? 0 : 1);
 }
 if (!args.reviewer) {
@@ -47,6 +49,27 @@ try {
 } catch (err) {
   console.error(String(err.message ?? err));
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// 访问令牌（4.0 企业版，opt-in）：--token <secret> 或 TASKSWARM_CONSOLE_TOKEN。
+// 设置后所有路由（静态页、/api/*、SSE）都要求令牌：Authorization: Bearer <t>
+// 或 ?token=<t>（EventSource 无法带 header，只能走 query）。
+// 对比用 sha256 归一后再 timingSafeEqual，避免长度泄露与时序侧信道。
+// ---------------------------------------------------------------------------
+const TOKEN = args.token || process.env.TASKSWARM_CONSOLE_TOKEN || '';
+function tokenMatches(presented) {
+  const a = crypto.createHash('sha256').update(String(presented ?? '')).digest();
+  const b = crypto.createHash('sha256').update(TOKEN).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+function authorized(req, url) {
+  if (!TOKEN) return true;
+  const m = /^Bearer\s+(.+)$/i.exec(String(req.headers['authorization'] ?? ''));
+  if (m && tokenMatches(m[1])) return true;
+  const q = url.searchParams.get('token');
+  if (q && tokenMatches(q)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +101,11 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && p === '/api/events') {
     const since = Number(url.searchParams.get('since') ?? 0) || 0;
     return json(res, 200, { rev: store.rev(), lastEventId: store.lastEventId(), events: store.eventsSince(since, 200) });
+  }
+  if (req.method === 'GET' && p === '/api/export') {
+    // 审计导出：归档事件（按序）+ 库内现存事件，附计数与导出摘要 sha256
+    const r = store.auditExport();
+    return json(res, 200, r);
   }
   if (req.method === 'POST' && p === '/api/review') {
     let body = '';
@@ -250,10 +278,13 @@ function render(d){
   });
 }
 
-function refresh(){ fetch('/api/state').then(function(r){ return r.json(); }).then(render).catch(function(){ connState(false); }); }
+var TOKEN = new URLSearchParams(location.search).get('token') || '';
+function api(u){ return u + (u.indexOf('?')>=0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN); }
+
+function refresh(){ fetch(api('/api/state')).then(function(r){ return r.json(); }).then(render).catch(function(){ connState(false); }); }
 
 function openTask(id){
-  fetch('/api/task/' + encodeURIComponent(id)).then(function(r){ return r.json(); }).then(function(d){
+  fetch(api('/api/task/' + encodeURIComponent(id))).then(function(r){ return r.json(); }).then(function(d){
     if (d.error) { alert(d.error); return; }
     CURRENT = id;
     var el = document.getElementById('drawer');
@@ -294,7 +325,7 @@ function review(verdict){
   var reason = (document.getElementById('reason')||{}).value || '';
   var btns = document.querySelectorAll('#reviewBox button');
   btns.forEach(function(b){ b.disabled = true; });
-  fetch('/api/review', { method:'POST', headers:{'Content-Type':'application/json'},
+  fetch(api('/api/review'), { method:'POST', headers:{'Content-Type':'application/json'},
     // 身份由服务端按启动参数 --reviewer 决定；body 里传 owner 也不会被采纳
     body: JSON.stringify({ taskId: CURRENT, verdict: verdict, reason: reason }) })
     .then(function(r){ return r.json(); })
@@ -310,11 +341,11 @@ function connState(ok){
   c.className = ok ? 'live' : '';
   document.getElementById('connText').textContent = ok ? '实时' : '断开';
 }
-var es = new EventSource('/api/watch');
+var es = new EventSource(api('/api/watch'));
 es.addEventListener('open', function(){ connState(true); });
 es.addEventListener('change', function(){ refresh(); });
 es.addEventListener('error', function(){ connState(false); });
-fetch('/api/state').then(function(r){ return r.json(); }).then(function(d){
+fetch(api('/api/state')).then(function(r){ return r.json(); }).then(function(d){
   REVIEWER = d.reviewer || '（未指定 --reviewer）';
   render(d);
 });
@@ -327,6 +358,15 @@ fetch('/api/state').then(function(r){ return r.json(); }).then(function(d){
 // ---------------------------------------------------------------------------
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`);
+  // 令牌认证门（未配置令牌时永远放行，行为与 3.x 完全一致）
+  if (!authorized(req, url)) {
+    if (url.pathname.startsWith('/api/')) {
+      return json(res, 401, { error: '访问令牌缺失或不正确。下一步：在控制台 URL 上带 ?token=<访问令牌>，或请求头 Authorization: Bearer <访问令牌>。' });
+    }
+    res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('401 Unauthorized —— 需要访问令牌（URL 加 ?token=<访问令牌>）');
+    return;
+  }
   // SSE 必须在 /api/ 前缀分支之前判断（否则被 404 掉）
   if (url.pathname === '/api/watch') {
     res.writeHead(200, {
@@ -354,7 +394,8 @@ server.listen(args.port, args.host, () => {
   console.log(`任务蜂群控制台已启动：http://${args.host}:${args.port}`);
   console.log(`  工作区：${store.dbPath}`);
   console.log(`  审批身份：${args.reviewer || '未指定（审批请求将被拒绝，重启时加 --reviewer）'}`);
-  if (args.host !== '127.0.0.1') console.log('  ⚠️ 正在监听非回环地址——控制台无鉴权，请勿暴露到不受信任的网络。');
+  console.log(`  访问令牌：${TOKEN ? '已启用（请求须带 Bearer 头或 ?token=）' : '未配置（仅建议本机使用）'}`);
+  if (args.host !== '127.0.0.1' && !TOKEN) console.log('  ⚠️ 正在监听非回环地址且未配置访问令牌——控制台无鉴权，请勿暴露到不受信任的网络。');
 });
 
 // 优雅退出：Ctrl+C / kill 时关闭监听与 SQLite 句柄再退出。

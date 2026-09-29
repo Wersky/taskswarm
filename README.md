@@ -4,8 +4,8 @@
 
 [English](README.en.md) | 中文
 
-[![tests](https://img.shields.io/badge/tests-166%20passed-brightgreen)](#测试与可靠性)
-[![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2085.6%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2096.4%25-brightgreen)](#测试与可靠性)
+[![tests](https://img.shields.io/badge/tests-172%20passed-brightgreen)](#测试与可靠性)
+[![coverage](https://img.shields.io/badge/coverage-%E8%A1%8C%2085.0%25%20%C2%B7%20%E5%87%BD%E6%95%B0%2096.0%25-brightgreen)](#测试与可靠性)
 [![deps](https://img.shields.io/badge/dependencies-0-brightgreen)](#工程要点)
 [![node](https://img.shields.io/badge/node-%3E%3D23.4-blue)](https://nodejs.org)
 
@@ -29,7 +29,7 @@
 能力比 ZCode 版更强（看板从"唯一通道"降级为"公共黑板 + 持久化事实源"）。
 
 > **验证边界（不夸大）**：三个宿主里，**只有 ZCode 是端到端跑过真实蜂群的**（本插件诞生于此，
-> 166 个测试全部跑在该路径上）。dsh 验证到"MCP 链路 + 11 工具 + 依赖守卫"这一层（以
+> 172 个测试全部跑在该路径上）。dsh 验证到"MCP 链路 + 11 工具 + 依赖守卫"这一层（以
 > `dsh-mcp-client` 相同的方式逐步驱动）；Codex 验证到"MCP 挂载成功"。**两边的"模型驱动完整蜂群"
 > 都还没跑过**——测试当日所有可用中转 key 余额不足。Codex 另有一项版本相关风险：
 > 子代理能否继承父会话的 MCP 工具随版本变化，需自行验证。详见各 `adapters/` 文档的实测记录表。
@@ -221,6 +221,42 @@ node cli/taskswarm.mjs serve --workspace . --reviewer reviewer-1            # �
 - 任务数组文件收纯数组或整个 `{goal, tasks}` 对象，`-` 表示 stdin；
 - 全部命令支持 `--workspace <目录>`（缺省 = 当前目录）；`npm link` 后可直接 `taskswarm <命令>`。
 
+## 企业版能力（4.0 新增）
+
+面向「凌晨两点出事时能查清、能恢复、能追责」的那部分需求——访问控制与审计。
+
+### 控制台访问令牌（opt-in）
+
+```bash
+node ui/server.mjs --workspace <项目目录> --reviewer <身份> --token <访问令牌>
+# 或环境变量：TASKSWARM_CONSOLE_TOKEN
+```
+
+- 配置后**所有路由**（静态页、`/api/*`、SSE 实时流）统一过认证门：请求头 `Authorization: Bearer <t>` 或 URL `?token=<t>`（浏览器访问直接在 URL 带参数即可，页面内 fetch/SSE 自动透传）；
+- 令牌对比先 sha256 归一再 `crypto.timingSafeEqual`——无长度泄露、无时序侧信道；
+- **不配置令牌时行为与 3.x 完全一致**（本机回环使用，测试锁定向后兼容）。配置后即可安全暴露到团队内网 / VPC；
+- 审批身份（`--reviewer`）与访问令牌（`--token`）是两道独立的门：前者管「谁在裁决」，后者管「谁能进来」。
+
+### 审计导出
+
+完整事件时间线一键导出——历史归档（`events-archive-*.jsonl`，按序号在前）+ 库内现存事件，附计数与导出摘要 sha256（校验导出件完整性）：
+
+```bash
+node cli/taskswarm.mjs audit                      # JSONL 到 stdout（纯事件流，管道友好）
+node cli/taskswarm.mjs audit --format json        # 含计数与 sha256 的完整对象
+node cli/taskswarm.mjs audit --format jsonl --file audit.jsonl   # 落文件，摘要走 stderr
+curl -H 'Authorization: Bearer <令牌>' http://127.0.0.1:7788/api/export   # 控制台入口（受令牌保护）
+```
+
+- `events` 表只追加不删除（超限部分导出到归档文件，`eventsDroppedTotal` 记账）——导出 = 归档 + 现存，总数守恒；
+- sha256 是**导出完整性摘要**（校验传输/归档过程没丢没坏），不是防篡改链——库内防篡改依赖文件系统权限与「事件只追加」的写入纪律。
+
+### 多租户与部署形态（口径说明）
+
+- **租户边界 = 工作区边界**：每 workspace 一份独立 SQLite 库（`<workspace>/任务蜂群/`），结构上不存在跨工作区查询路径——隔离是物理的，不是靠查询过滤；
+- **on-prem 天生满足**：零依赖单库文件，数据不出机器；不需要 SaaS 也能用上全部能力（这是与 LangGraph 平台们相反的取舍——我们把数据自主当卖点，不当负担）；
+- 尚未做（按客户要求再加）：多租户网关、SSO/LDAP 对接、配额计费、SLA——当前形态定位「团队内网部署的自托管协调层」。
+
 ## MCP 工具
 
 | 工具 | 调用方 | 作用 |
@@ -242,11 +278,11 @@ node cli/taskswarm.mjs serve --workspace . --reviewer reviewer-1            # �
 
 ## 测试与可靠性
 
-**166 个测试，全部通过；行覆盖 85.6%，函数覆盖 96.4%**（口径为 cli/core/server 三文件共 1783 行，绝对覆盖行数 1527 —— 未覆盖部分集中在防御性错误分支、usage 帮助文本与极端锁竞争路径。`ui/server.mjs` 的控制台链路由 ui 测试真实覆盖，但 Windows 下测试以 TerminateProcess 结束子进程、V8 覆盖率数据无法落盘，故不计入本表——这是平台语义，不是未测试）。
+**172 个测试，全部通过；行覆盖 85.0%，函数覆盖 96.0%**（口径为 cli/core/server 三文件共 1849 行，绝对覆盖行数 1572 —— 未覆盖部分集中在防御性错误分支、usage 帮助文本与极端锁竞争路径。`ui/server.mjs` 的控制台链路由 ui/enterprise 测试真实覆盖，但 Windows 下测试以 TerminateProcess 结束子进程、V8 覆盖率数据无法落盘，故不计入本表——这是平台语义，不是未测试）。
 
 ```bash
-npm test          # 166 tests, 0 fail
-npm run coverage  # 行覆盖 85.6% (1527/1783) · 函数覆盖 96.4% (163/169)
+npm test          # 172 tests, 0 fail
+npm run coverage  # 行覆盖 85.0% (1572/1849) · 函数覆盖 96.0% (170/177)
 ```
 
 要求 Node ≥ 23.4（内置 `node:sqlite`），无任何测试框架依赖（用内置 `node:test` + `node:assert/strict`）。

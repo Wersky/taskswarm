@@ -219,7 +219,8 @@ describe('CLI', () => {
 
   test('serve 把控制台拉起来：/api/state 经 HTTP 可访问（无 reviewer 可启动、审批才受限）', async () => {
     const ws = makeWorkspace('cli-serve');
-    const port = 17899 + (process.pid % 100); // 避开并行测试跑同机时的端口冲突
+    // 端口选互不相交频段（ui.test 硬编码 17901-17902，enterprise 用 18100+/18500+）
+    const port = 19100 + (process.pid % 400);
     try {
       const child = execFile(process.execPath, [CLI, 'serve', '--workspace', ws, '--port', String(port)]);
       const t0 = Date.now();
